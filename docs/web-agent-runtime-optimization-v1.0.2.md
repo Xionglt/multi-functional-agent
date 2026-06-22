@@ -1,5 +1,7 @@
 # Web Agent Runtime v1.0.2 初步优化方案
 
+> 中文版在前，English version follows.
+
 日期：2026-06-22
 
 当前分支：`cl/personal/kai/web-buddy/v-1.0.2`
@@ -371,3 +373,363 @@
 v1.0.2 的关键不是继续扩展功能，而是建立 agent 的性能工程底座：指标、预算、状态、压缩和 benchmark。
 
 一旦这套底座稳定，后续再优化岗位匹配、表单填写、跨网站泛化时，就能清楚知道每次改动是否真的提升了速度、成本和成功率。
+
+---
+
+# Web Agent Runtime v1.0.2 Initial Optimization Plan
+
+Date: 2026-06-22
+
+Branch: `cl/personal/kai/web-buddy/v-1.0.2`
+
+## Background
+
+In v1.0.0, the project completed its first usable loop: the recovered Claude Code runtime was connected to Playwright MCP and successfully exercised an initial Alibaba Careers application flow. In v1.0.1, the project added a Web console, stream-json trace parsing, human handoff continuation, and live runtime observability.
+
+The next stage should not focus on adding more websites or more surface-level features. The goal is to go deeper and improve the runtime itself: speed, token cost, context management, recovery behavior, and measurable reliability.
+
+## Goals
+
+- Reduce LLM calls and total token usage for the same task.
+- Reduce context bloat from page snapshots, form details, resume text, and run history.
+- Improve browser action success rate by reducing stale refs, duplicate clicks, repeated snapshots, and local loops.
+- Make every run measurable, comparable, and debuggable.
+- Evolve the runtime from "a model that can call tools" into a structured external working memory for the model.
+
+## Current Problems
+
+### 1. No stable metrics baseline
+
+The project already has trace data and a Web console, but it does not yet produce a unified metrics summary. It is still difficult to answer:
+
+- How many LLM calls did a run use?
+- Which tools were called most often?
+- Where did token usage go: resume, page snapshots, history, or tool results?
+- Did a failure come from login, form handling, stale refs, navigation, or model drift?
+- Did a new optimization actually make the agent faster, cheaper, or more reliable?
+
+Without metrics, optimization becomes intuition-driven instead of evidence-driven.
+
+### 2. Resume context is too heavy
+
+The current Claude runtime prompt includes both structured resume data and up to roughly 14k characters of raw resume text. Continuation prompts may include the original task context again.
+
+This creates several issues:
+
+- First-turn prompt tokens are high.
+- Continuation cost is repeatedly amplified.
+- Resume text consumes context window space that should be used for page state and task state.
+- Job matching and form filling do not need the same resume granularity.
+
+### 3. Page representation is still too coarse
+
+The current `browser_snapshot` returns a generic interactive element list, and `pageView` performs only basic compaction. This is general, but not yet decision-oriented:
+
+- It may include many irrelevant navigation, favorite, filter, or pagination controls.
+- Valuable job cards, form fields, upload state, and validation errors may not be highlighted strongly enough.
+- Page changes often force the model to read another large snapshot.
+- The runtime does not directly answer questions such as "Which job should I click?", "Which required fields are missing?", or "Did the resume upload parse successfully?"
+
+### 4. Too many LLM round trips
+
+The current architecture is mostly ReAct-style: think one step, call one tool, observe, repeat. This is safe and general, but it is not ideal for speed or token cost.
+
+Many mechanical operations could be handled by the runtime without going back to the model after every tiny step, such as filling multiple fields, uploading a resume and waiting for parsing, or clicking and waiting for a page transition.
+
+### 5. Continuation state is not structured enough
+
+Automatic continuation currently relies mostly on previous stdout and the original prompt. It works, but it is not ideal:
+
+- stdout summaries are natural language, not precise recovery state.
+- the original prompt is repeatedly injected, which increases token cost.
+- there is no single state object describing the current stage, selected job, filled fields, missing fields, and latest failure.
+
+### 6. Debug mode and performance mode are not separated
+
+The current default favors observability: headful browser, slow motion, typing delay, and browser retention. This is good for debugging but bad for performance benchmarking.
+
+The runtime should explicitly support separate profiles:
+
+- `debug`: visible browser, slow motion, full trace, more screenshots.
+- `fast`: headless or low-latency actions, compact trace, fewer screenshots.
+- `benchmark`: fixed task set, fixed model parameters, metrics output.
+
+## Optimization Directions
+
+### Direction 1: Runtime metrics
+
+Add a per-run `metrics.json` and surface the core metrics in the Web console.
+
+Suggested fields:
+
+```json
+{
+  "runId": "string",
+  "scenario": "alibaba-apply",
+  "status": "completed|blocked|incomplete|failed",
+  "durationMs": 0,
+  "llmCalls": 0,
+  "mcpToolCalls": 0,
+  "browserSnapshots": 0,
+  "browserClicks": 0,
+  "browserTypes": 0,
+  "browserWaits": 0,
+  "inputTokens": 0,
+  "outputTokens": 0,
+  "estimatedCost": 0,
+  "snapshotBytes": 0,
+  "toolResultBytes": 0,
+  "resumeContextBytes": 0,
+  "staleRefFailures": 0,
+  "repeatedActions": 0,
+  "manualHandoffs": 0,
+  "finalStage": "search|detail|login|form|submitted|blocked",
+  "failureCategory": "login|captcha|form|navigation|model|tool|unknown"
+}
+```
+
+The first implementation can start with span counts, duration, stdout bytes, and tool call counts. Precise token and cost accounting can be added later through model usage fields.
+
+### Direction 2: Context budget management
+
+Introduce a `ContextBudgetManager` so every piece of model-facing context goes through a budget policy.
+
+Suggested budget buckets:
+
+- system instructions: fixed cap.
+- user goal: always preserved.
+- resume summary: short default summary.
+- page state: dynamic budget, prioritized by the current decision.
+- history: recent key events and structured state only.
+- tool results: large payloads go to trace; the model sees a summary.
+
+Principles:
+
+- Do not put the full resume text into the default prompt.
+- Do not put full previous stdout into continuation prompts.
+- Do not expose all page elements by default.
+- Persist large data to trace and expose summaries or targeted snippets to the model.
+
+### Direction 3: Treat the resume as a queryable resource
+
+Turn the resume from a large prompt blob into a structured resource.
+
+Suggested resources:
+
+- `resume_profile`: name presence, contact availability, education, experience, skills overview.
+- `resume_capability_summary`: capability summary for job matching.
+- `resume_form_fields`: field dictionary for application forms.
+- `resume_relevant_snippets(query)`: targeted snippets for a job description or form field.
+
+The default prompt should include only `resume_profile` and `resume_capability_summary`. Detailed fields or snippets should be provided only when the agent reaches a form or needs evidence.
+
+Expected benefits:
+
+- lower first-turn token usage.
+- lower continuation token usage.
+- more stable form filling because fields come from structured data instead of ad hoc extraction from raw text.
+
+### Direction 4: Semantic page tools
+
+Add higher-level page understanding tools alongside the generic snapshot tool. The model should receive decision-ready objects, not only raw refs.
+
+Candidate tools:
+
+- `browser_page_summary`
+  - Returns page type, main region, visible task state, and key buttons.
+
+- `browser_find_text`
+  - Searches visible text and returns nearby context.
+
+- `browser_list_job_candidates`
+  - Returns job card candidates: title, location, department, update date, clickable text, and possible fit rationale.
+
+- `browser_form_candidates`
+  - Returns current fields, required fields, missing fields, errors, and upload state.
+
+- `browser_snapshot_delta`
+  - Returns key elements that appeared, disappeared, or changed since the previous snapshot.
+
+This reduces the need for the model to infer page structure from dozens of raw refs every turn.
+
+### Direction 5: Reduce tool round trips
+
+Wrap common mechanical sequences as compound tools.
+
+Candidate tools:
+
+- `browser_click_and_wait`
+  - Clicks, waits for stability, and returns the new page summary.
+
+- `browser_fill_form_batch`
+  - Fills multiple fields in one call and returns success, failure, and missing-field details.
+
+- `browser_upload_resume_and_parse`
+  - Uploads a resume, waits for parsing, and returns form differences.
+
+- `browser_recover_from_failure`
+  - Attempts automatic recovery for stale refs, invisible elements, and blocking overlays.
+
+The goal is to avoid spending one LLM call on every tiny mechanical browser action.
+
+### Direction 6: Structured AgentState
+
+Add a persisted, resumable, displayable `AgentState`.
+
+Suggested shape:
+
+```json
+{
+  "goal": "string",
+  "site": "string",
+  "stage": "search|detail|login|form|review|submitted|blocked",
+  "loginStatus": "unknown|logged_in|login_required|captcha_required",
+  "selectedJobs": [],
+  "currentJob": {
+    "title": "string",
+    "url": "string",
+    "fitReason": "string",
+    "risk": "low|medium|high"
+  },
+  "form": {
+    "uploadStatus": "unknown|uploaded|parsed|failed",
+    "filledFields": {},
+    "missingFields": [],
+    "errors": []
+  },
+  "lastAction": {},
+  "lastFailure": {
+    "category": "stale_ref|navigation|form|login|captcha|model|tool|unknown",
+    "message": "string",
+    "recoverable": true
+  }
+}
+```
+
+Continuation should prioritize `AgentState` over raw stdout history.
+
+### Direction 7: Speed profiles and benchmark tasks
+
+Add runtime profiles:
+
+- `--profile debug`
+  - headful, slow motion, full trace, more screenshots.
+
+- `--profile fast`
+  - headless, low-latency waits, compact trace, fewer screenshots.
+
+- `--profile benchmark`
+  - fixed configuration, fixed tasks, metrics output.
+
+Build local benchmark pages:
+
+- simple login page.
+- job list page.
+- job detail page.
+- resume upload form.
+- complex required form.
+- custom dropdown / city selector.
+- stale-ref / DOM mutation page.
+
+Local benchmark pages allow fast iteration without repeatedly hitting real recruiting websites.
+
+## Priority
+
+### P0: Make runs measurable
+
+Deliverables:
+
+- Generate `metrics.json` from agent trace.
+- Display core metrics in the Web console.
+- Record metrics changes in docs.
+
+### P1: Context budget and resume compaction
+
+Deliverables:
+
+- Default prompt no longer includes full raw resume text.
+- Add resume summary and form field dictionary.
+- Continuation prompt uses structured state and short summaries.
+
+### P2: Semantic page tools
+
+Deliverables:
+
+- `browser_page_summary`
+- `browser_find_text`
+- `browser_form_candidates`
+- `browser_list_job_candidates`
+
+### P3: Compound tools and recovery
+
+Deliverables:
+
+- `browser_click_and_wait`
+- `browser_fill_form_batch`
+- `browser_upload_resume_and_parse`
+- stale-ref recovery.
+
+### P4: Benchmark suite
+
+Deliverables:
+
+- local mock pages.
+- benchmark runner.
+- metrics comparison report.
+
+## Suggested v1.0.2 Scope
+
+To keep v1.0.2 focused, it should deliver the foundation for metrics and context budgets rather than a broad feature expansion.
+
+Suggested scope:
+
+- automatic `metrics.json` generation.
+- Web console metrics display.
+- resume context layering: short summary by default, no raw resume by default.
+- continuation prompt based on short summary and an initial structured state.
+- `--profile debug|fast|benchmark` design, with basic `debug` and `fast` behavior implemented first.
+
+Out of scope for this version:
+
+- more recruiting websites.
+- complex job recommendation algorithms.
+- large frontend rewrite.
+- full benchmark platform.
+
+## Acceptance Criteria
+
+- The same Alibaba application task still runs.
+- Each run generates `metrics.json`.
+- The Web console shows core metrics.
+- The default prompt no longer contains full raw resume text.
+- Continuation no longer repeats the full original prompt.
+- `npm run build` passes.
+- At least one local mock-page benchmark runs successfully.
+
+## Long-Term Evaluation Metrics
+
+- completion rate: `COMPLETED / total runs`
+- human-block rate: `BLOCKED / total runs`
+- average LLM calls
+- average MCP tool calls
+- average snapshots
+- average input tokens
+- average output tokens
+- average task duration
+- stale-ref recovery success rate
+- form field accuracy
+- cost per successful run
+
+## Design Principles
+
+- Optimize the runtime first; do not hardcode business workflows too early.
+- Prefer structured state over longer prompts.
+- Show the model decision-relevant page state, not the entire page.
+- Wrap mechanical browser sequences in compound tools.
+- Use real metrics to judge improvements.
+
+## Conclusion
+
+The key purpose of v1.0.2 is not feature expansion. It is to establish the performance engineering foundation for the agent: metrics, budgets, state, compression, and benchmarks.
+
+Once this foundation is stable, future improvements to job matching, form filling, and cross-site generalization can be evaluated by whether they truly improve speed, cost, and success rate.

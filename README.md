@@ -123,6 +123,8 @@ stop for a human. Final-submit *refuses* to auto-submit even when approved.
 
 ## Documentation
 
+- [Full experience guide](./docs/full-experience-guide.md) — bilingual setup and walkthrough for cloning the repo and trying every major feature
+- [Web Agent Runtime v1.0.2 optimization plan](./docs/web-agent-runtime-optimization-v1.0.2.md) — bilingual performance, token, context, and benchmark plan
 - [Agent iteration log](./docs/agent-iteration-log.md) — project iteration notes, run conclusions, and next-step records
 - [Agent + MCP README](./packages/playwright-mcp/README.md) — architecture, CLI, env, scripts
 - [Config examples](./configs/) (`agent.env.example`, `resume.example.json`)

@@ -33,25 +33,25 @@ git checkout main
 
 项目当前没有根目录 `package.json`，主要需要安装两个 package：
 
-- `packages/playwright-mcp`
 - `packages/web-buddy`
+- `packages/claude-code`
 
 ### 3. 安装依赖
 
 ```bash
-cd packages/playwright-mcp
+cd packages/web-buddy
 npm install
 npm run build
 
-cd ../web-buddy
+cd ../claude-code
 npm install
 npm run build
 ```
 
-`packages/playwright-mcp` 的 `postinstall` 会安装 Chromium。如果 Chromium 没装成功，可以手动执行：
+`packages/web-buddy` 的 `postinstall` 会安装 Chromium。如果 Chromium 没装成功，可以手动执行：
 
 ```bash
-cd ../playwright-mcp
+cd ../web-buddy
 npx playwright install chromium
 ```
 
@@ -60,7 +60,7 @@ npx playwright install chromium
 离线 demo 使用本地 mock 表单，不访问真实招聘网站，适合验证浏览器、构建、trace 是否正常。
 
 ```bash
-cd packages/playwright-mcp
+cd packages/web-buddy
 npm run demo
 ```
 
@@ -134,7 +134,7 @@ RESUME_PDF_PATH=/path/to/resume.pdf
 Web 控制台适合观察 agent 行为、配置模型、上传简历、查看事件流和 trace。
 
 ```bash
-cd packages/playwright-mcp
+cd packages/web-buddy
 npm run web
 ```
 
@@ -161,7 +161,7 @@ http://localhost:5178
 第一步，登录一次并保存 cookie：
 
 ```bash
-cd packages/playwright-mcp
+cd packages/web-buddy
 npm run login -- https://your-recruiting-site.com/
 ```
 
@@ -193,7 +193,7 @@ npm run fill -- https://your-recruiting-site.com/apply --resume /path/to/resume.
 先做 dry-run，确认配置和 MCP 工具都能生成：
 
 ```bash
-cd packages/playwright-mcp
+cd packages/web-buddy
 npm run alibaba:apply -- \
   --resume /path/to/resume.pdf \
   --dry-run
@@ -241,7 +241,7 @@ npm run alibaba:apply -- --resume /path/to/resume.pdf --no-wait-on-blocked
 raw 路径不走恢复版 Claude Code runtime，而是使用本项目的本地 minimal agent loop。它适合对比“Claude runtime + MCP”和“本地 raw runtime”的行为差异。
 
 ```bash
-cd packages/playwright-mcp
+cd packages/web-buddy
 npm run alibaba:apply:raw -- \
   --resume /path/to/resume.pdf \
   --keep-browser-open
@@ -260,7 +260,7 @@ node dist/cli/demo.js raw 'https://example.com' \
 如果只想体验职位抓取和匹配，不进入真实投递流程：
 
 ```bash
-cd packages/playwright-mcp
+cd packages/web-buddy
 npm run demo:match
 ```
 
@@ -309,10 +309,10 @@ output/traces/<traceId>/events.jsonl
 
 #### npm 找不到 package.json
 
-如果你已经在 `packages/playwright-mcp` 目录里，就不要再写：
+如果你已经在 `packages/web-buddy` 目录里，就不要再写：
 
 ```bash
-npm --prefix packages/playwright-mcp run ...
+npm --prefix packages/web-buddy run ...
 ```
 
 应该直接运行：
@@ -324,7 +324,7 @@ npm run ...
 如果你在仓库根目录，才使用：
 
 ```bash
-npm --prefix packages/playwright-mcp run web
+npm --prefix packages/web-buddy run web
 ```
 
 #### 缺少模型 Key
@@ -426,25 +426,25 @@ git checkout main
 
 The repository currently has no root-level `package.json`. Install the two main packages:
 
-- `packages/playwright-mcp`
 - `packages/web-buddy`
+- `packages/claude-code`
 
 ### 3. Install Dependencies
 
 ```bash
-cd packages/playwright-mcp
+cd packages/web-buddy
 npm install
 npm run build
 
-cd ../web-buddy
+cd ../claude-code
 npm install
 npm run build
 ```
 
-`packages/playwright-mcp` runs `playwright install chromium` during postinstall. If Chromium is missing, install it manually:
+`packages/web-buddy` runs `playwright install chromium` during postinstall. If Chromium is missing, install it manually:
 
 ```bash
-cd ../playwright-mcp
+cd ../web-buddy
 npx playwright install chromium
 ```
 
@@ -453,7 +453,7 @@ npx playwright install chromium
 The offline demo uses a local mock form. It does not touch a real recruiting website and is the safest first check.
 
 ```bash
-cd packages/playwright-mcp
+cd packages/web-buddy
 npm run demo
 ```
 
@@ -525,7 +525,7 @@ RESUME_PDF_PATH=/path/to/resume.pdf
 The Web console is useful for model configuration, resume upload, live events, screenshots, and trace review.
 
 ```bash
-cd packages/playwright-mcp
+cd packages/web-buddy
 npm run web
 ```
 
@@ -552,7 +552,7 @@ In the Web UI you can:
 First, log in once and save cookies:
 
 ```bash
-cd packages/playwright-mcp
+cd packages/web-buddy
 npm run login -- https://your-recruiting-site.com/
 ```
 
@@ -584,7 +584,7 @@ This is the main project path: the recovered Claude Code runtime operates Alibab
 First run dry-run:
 
 ```bash
-cd packages/playwright-mcp
+cd packages/web-buddy
 npm run alibaba:apply -- \
   --resume /path/to/resume.pdf \
   --dry-run
@@ -625,7 +625,7 @@ If the site requires login, SMS, QR scan, captcha, or other human-only steps, th
 The raw path does not use the recovered Claude Code runtime. It uses this repository's local minimal agent loop, which is useful for comparison.
 
 ```bash
-cd packages/playwright-mcp
+cd packages/web-buddy
 npm run alibaba:apply:raw -- \
   --resume /path/to/resume.pdf \
   --keep-browser-open
@@ -644,7 +644,7 @@ node dist/cli/demo.js raw 'https://example.com' \
 To try job scraping and matching without entering the real application flow:
 
 ```bash
-cd packages/playwright-mcp
+cd packages/web-buddy
 npm run demo:match
 ```
 
@@ -693,10 +693,10 @@ For debugging, check in this order:
 
 #### npm cannot find package.json
 
-If you are already inside `packages/playwright-mcp`, do not run:
+If you are already inside `packages/web-buddy`, do not run:
 
 ```bash
-npm --prefix packages/playwright-mcp run ...
+npm --prefix packages/web-buddy run ...
 ```
 
 Run this instead:
@@ -708,7 +708,7 @@ npm run ...
 Use `--prefix` only from the repository root:
 
 ```bash
-npm --prefix packages/playwright-mcp run web
+npm --prefix packages/web-buddy run web
 ```
 
 #### Missing model key

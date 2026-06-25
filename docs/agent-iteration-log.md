@@ -186,8 +186,8 @@ npm run alibaba:apply -- --env-file '/path/to/.env' --resume '/path/to/resume.pd
 ```
 
 - 构建产物确认包含：
-  - `packages/playwright-mcp/dist/browser/click-text.js`
-  - `packages/playwright-mcp/dist/server.js` 中的 `browser_click_text`
+  - `packages/web-buddy/dist/browser/click-text.js`
+  - `packages/web-buddy/dist/server.js` 中的 `browser_click_text`
 - 工具级最小复现通过：在临时页面中创建普通 `div onclick` 岗位标题，`browser_click_text({ text: '大模型语音工程师' })` 可以成功触发点击。
 
 ### 结论
@@ -283,7 +283,7 @@ node ./scripts/claude-runtime-alibaba.mjs --env-file '/path/to/.env' --resume '/
 ```bash
 node --check scripts/claude-runtime-alibaba.mjs
 npm run build
-npm --prefix ../web-buddy run build
+npm --prefix ../claude-code run build
 npm run alibaba:apply -- --env-file '/path/to/.env' --resume '/path/to/resume.pdf' --dry-run
 ```
 
@@ -319,7 +319,7 @@ node ./scripts/claude-runtime-alibaba.mjs --env-file '/path/to/.env' --resume '/
 
 ### 改动
 
-- `packages/playwright-mcp/scripts/claude-runtime-alibaba.mjs` 默认不再传 `--max-turns`，让 Claude Code runtime 自己持续推进，直到模型完成、遇到人工阻塞或进程级错误。
+- `packages/web-buddy/scripts/claude-runtime-alibaba.mjs` 默认不再传 `--max-turns`，让 Claude Code runtime 自己持续推进，直到模型完成、遇到人工阻塞或进程级错误。
 - `--max-turns <n>` 保留为可选调试参数；`--max-turns 0`、`none`、`unlimited` 都会被视为不设上限。
 - 浏览器默认保持打开，新增 `--close-browser-on-exit` / `--no-keep-browser-open` 用于短测试时关闭窗口。
 - 每次运行新增 `run-events.log`，只记录启动命令、turn cap、浏览器保留设置、退出码和 signal，不默认记录完整简历内容。
@@ -356,24 +356,24 @@ node ./scripts/claude-runtime-alibaba.mjs --env-file '/path/to/.env' --resume '/
 
 ### 背景
 
-- 用户希望先不继续优化本地简化版 raw agent，而是把当前阿里投递命令切到恢复出来的 `packages/web-buddy` Claude Code runtime 上，观察更接近原始 Claude Code agent 的自主表现。
+- 用户希望先不继续优化本地简化版 raw agent，而是把当前阿里投递命令切到恢复出来的 `packages/claude-code` Claude Code runtime 上，观察更接近原始 Claude Code agent 的自主表现。
 - 目标是保留“模型自主完成投递目标”的实验形态，不加入固定岗位筛选、固定点击路径或业务流程限制。
 
 ### 改动
 
-- 新增 `packages/playwright-mcp/scripts/claude-runtime-alibaba.mjs`，作为 Claude Code runtime 接入层：
-  - 启动 `packages/web-buddy/dist/cli.js`。
-  - 将 `packages/playwright-mcp/dist/server.js` 暴露为 MCP browser server。
+- 新增 `packages/web-buddy/scripts/claude-runtime-alibaba.mjs`，作为 Claude Code runtime 接入层：
+  - 启动 `packages/claude-code/dist/cli.js`。
+  - 将 `packages/web-buddy/dist/server.js` 暴露为 MCP browser server。
   - 读取简历文件并在运行时传给模型。
   - 支持 `--env-file`、`--resume`、`--prompt`、`--max-turns`、`--headless/--headful`、`--dry-run`、`--stream-json` 等参数。
   - 默认只保存脱敏后的 `prompt.redacted.txt`，避免把完整简历内容写进运行目录。
   - 真实运行时通过 stdin 把完整 prompt 传给 Claude CLI，避免简历正文出现在子进程命令参数中。
-- 将 `packages/playwright-mcp` 的默认 `npm run alibaba:apply` 改为 Claude Code runtime 路径。
+- 将 `packages/web-buddy` 的默认 `npm run alibaba:apply` 改为 Claude Code runtime 路径。
 - 保留旧的本地简化 raw agent 入口为 `npm run alibaba:apply:raw`，方便对比。
 - 增加 `npm run alibaba:claude` 作为 Claude runtime 实验入口别名。
-- 更新根 README 和 `packages/playwright-mcp/README.md`，说明新旧两条运行路径。
+- 更新根 README 和 `packages/web-buddy/README.md`，说明新旧两条运行路径。
 - 修复恢复源码中的运行时缺失模块：
-  - 新增 `packages/web-buddy/src/utils/filePersistence/types.ts`。
+  - 新增 `packages/claude-code/src/utils/filePersistence/types.ts`。
   - 该模块只补齐 file persistence 启动所需的类型和常量，避免 runtime 启动时报 `DEFAULT_UPLOAD_CONCURRENCY` 缺失。
 
 ### 验证
@@ -382,14 +382,14 @@ node ./scripts/claude-runtime-alibaba.mjs --env-file '/path/to/.env' --resume '/
 
 ```bash
 npm install
-npm --prefix ../web-buddy install
+npm --prefix ../claude-code install
 ```
 
 - 构建通过：
 
 ```bash
 npm run build
-npm --prefix ../web-buddy run build
+npm --prefix ../claude-code run build
 ```
 
 - dry-run 通过，生成 MCP 配置和脱敏提示词，不实际调用模型：
@@ -412,7 +412,7 @@ node ./scripts/claude-runtime-alibaba.mjs --env-file '/path/to/.env' --resume '/
 
 - 当前默认阿里投递命令已经不是之前的本地简化 raw agent，而是恢复版 Claude Code runtime + Playwright MCP。
 - 这条链路已经验证可以实际调用模型、打开阿里招聘页面、获取页面快照并正常退出。
-- `packages/web-buddy` 恢复源码仍可能存在少量缺失文件或运行期兼容问题；这次遇到并修复了 file persistence 的 `types.ts` 缺失。
+- `packages/claude-code` 恢复源码仍可能存在少量缺失文件或运行期兼容问题；这次遇到并修复了 file persistence 的 `types.ts` 缺失。
 
 ### 遗留问题 / 下一步
 

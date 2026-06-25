@@ -3,6 +3,7 @@ import type { HumanGate } from '../sdk/human.js'
 import type { ChatCompletion, ChatMessage, ChatOptions } from '../sdk/llm.js'
 import type { ResumeProfile } from '../sdk/resume.js'
 import type { ToolContext, ToolRegistry } from '../runtime/local/tool-registry.js'
+import type { TaskState } from '../task/task-state.js'
 
 export type AgentSafetyMode = 'guarded' | 'raw'
 
@@ -53,6 +54,7 @@ export interface PromptAssemblerInput {
   resume: ResumeProfile
   ctx: Pick<ToolContext, 'sessionId'>
   extraContext?: string
+  taskState?: TaskState
   safetyMode?: AgentSafetyMode
 }
 

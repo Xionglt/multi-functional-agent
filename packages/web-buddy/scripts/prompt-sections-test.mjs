@@ -45,6 +45,14 @@ const snapshot = {
     visibleErrors: ['Email is required'],
     updatedAt: '2026-06-25T00:00:00.000Z',
   },
+  taskState: {
+    schemaVersion: 'task-state/v1',
+    goal: 'Fill the application draft.',
+    phase: 'reviewing',
+    knownBlockers: ['Final submit requires human approval'],
+    completionCriteria: ['Name and email are filled', 'Draft is ready for review'],
+    updatedAt: '2026-06-25T00:00:02.000Z',
+  },
   freshness: {
     pageStateUpdatedAt: '2026-06-25T00:00:00.000Z',
     formStateUpdatedAt: '2026-06-25T00:00:00.000Z',
@@ -86,6 +94,11 @@ const sections = buildPromptSections(snapshot, {
 })
 
 assert.deepEqual(sections.map((section) => section.id), PROMPT_SECTION_ORDER, 'prompt section order must be stable')
+assert.deepEqual(
+  PROMPT_SECTION_ORDER.slice(0, 5),
+  ['SYSTEM_ROLE', 'SAFETY_RULES', 'TASK', 'TASK_STATE', 'RESUME_SUMMARY'],
+  'TASK_STATE should render after TASK and before RESUME_SUMMARY',
+)
 
 const rendered = renderPromptSections(sections)
 let previousIndex = -1
@@ -104,6 +117,16 @@ assert(formSection.content.includes('Email'), 'missing required labels should en
 assert(formSection.content.includes('submitCandidates:'), 'submitCandidates should enter prompt')
 assert(formSection.content.includes('Submit application'), 'submit candidate text should enter prompt')
 assert(formSection.content.includes('freshness: ageMs=3000 stale=false'), 'form freshness should enter prompt')
+
+const taskStateSection = sections.find((section) => section.id === 'TASK_STATE')
+assert(taskStateSection, 'TASK_STATE should exist')
+assert(taskStateSection.content.includes('schemaVersion: task-state/v1'), 'TaskState schema should enter prompt')
+assert(taskStateSection.content.includes('phase: reviewing'), 'TaskState phase should enter prompt')
+assert(taskStateSection.content.includes('Final submit requires human approval'), 'TaskState blockers should enter prompt')
+assert(taskStateSection.content.includes('Draft is ready for review'), 'TaskState completion criteria should enter prompt')
+
+const defaultTaskStateSection = findSection(buildPromptSections({ ...snapshot, taskState: undefined }), 'TASK_STATE')
+assert(defaultTaskStateSection.content.includes('phase: observing'), 'missing taskState should render a default observing state')
 
 const pageSection = sections.find((section) => section.id === 'CURRENT_PAGE_STATE')
 assert(pageSection, 'CURRENT_PAGE_STATE should exist')

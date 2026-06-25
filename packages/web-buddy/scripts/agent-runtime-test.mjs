@@ -44,6 +44,7 @@ class RuntimeMockLlm {
     this.label = 'runtime-mock-llm'
     this.turn = 0
     this.sawPoisonFreePrompt = false
+    this.sawTaskStatePrompt = false
   }
 
   findRef(regex) {
@@ -60,6 +61,9 @@ class RuntimeMockLlm {
     const rendered = JSON.stringify(messages)
     assert(!rendered.includes('POISON ARTIFACT'), 'AgentRuntime must not read trace artifact files into prompts')
     this.sawPoisonFreePrompt = true
+    if (rendered.includes('## TASK_STATE') && rendered.includes('phase: observing')) {
+      this.sawTaskStatePrompt = true
+    }
 
     this.turn += 1
     if (this.turn === 1) {
@@ -131,6 +135,7 @@ try {
   assert.equal(result.blocked, false)
   assert.equal(result.stopReason, 'agent_done')
   assert(runtimeMock.sawPoisonFreePrompt, 'mock should have inspected runtime prompts')
+  assert(runtimeMock.sawTaskStatePrompt, 'PromptAssembler should add default observing TaskState to runtime prompts')
   assert(events.some((event) => event.schemaVersion === 'agent-runtime-event/v1'), 'runtime events should be wrapped')
 
   const directLoopResult = await runAgentLoop({

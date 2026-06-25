@@ -1,6 +1,7 @@
 import type { FormState } from '../observation/form-state.js'
 import type { PageState } from '../observation/page-state.js'
 import type { RiskLevel } from '../sdk/trace.js'
+import type { TaskState } from '../task/task-state.js'
 
 export type MaybePromise<T> = T | Promise<T>
 
@@ -37,6 +38,7 @@ export interface ContextSnapshot {
   goal: string
   page?: PageState
   form?: FormState
+  taskState?: TaskState
   freshness: ContextFreshness
   resumeSummary: string
   recentActions: ContextRecentAction[]
@@ -54,6 +56,7 @@ export interface ContextSnapshotInput {
   safetyNotes?: string[]
   blockers?: string[]
   extraContext?: string
+  taskState?: TaskState
   updatedAt?: string
 }
 
@@ -61,6 +64,7 @@ export type PromptSectionId =
   | 'SYSTEM_ROLE'
   | 'SAFETY_RULES'
   | 'TASK'
+  | 'TASK_STATE'
   | 'RESUME_SUMMARY'
   | 'CURRENT_PAGE_STATE'
   | 'CURRENT_FORM_STATE'

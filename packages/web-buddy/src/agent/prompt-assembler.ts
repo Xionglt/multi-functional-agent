@@ -9,6 +9,7 @@ import {
   USER_PROMPT_SECTION_IDS,
 } from '../context/prompt-sections.js'
 import type { ContextRecentAction, ContextSnapshot, PromptSection } from '../context/types.js'
+import { createDefaultTaskState } from '../task/task-state.js'
 import type { AgentSafetyMode, PromptAssemblerInput } from './types.js'
 
 export function safetyNotesFor(mode: AgentSafetyMode = 'guarded'): string[] {
@@ -38,6 +39,7 @@ export class PromptAssembler {
     recentActions: ContextRecentAction[],
     blockers: string[],
   ): Promise<ContextSnapshot> {
+    const updatedAt = new Date().toISOString()
     return contextManager.createSnapshot({
       sessionId: input.ctx.sessionId,
       goal: input.goal,
@@ -46,6 +48,8 @@ export class PromptAssembler {
       safetyNotes: safetyNotesFor(input.safetyMode ?? 'guarded'),
       blockers,
       extraContext: input.extraContext,
+      taskState: input.taskState ?? createDefaultTaskState({ goal: input.goal, updatedAt }),
+      updatedAt,
     })
   }
 

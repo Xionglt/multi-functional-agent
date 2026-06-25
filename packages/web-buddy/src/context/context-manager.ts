@@ -41,6 +41,7 @@ export class ContextManager {
       goal: input.goal,
       page,
       form,
+      ...(input.taskState ? { taskState: input.taskState } : {}),
       freshness: buildContextFreshness({
         pageStateUpdatedAt: page?.updatedAt,
         formStateUpdatedAt: form?.updatedAt,

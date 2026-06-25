@@ -1,5 +1,6 @@
 import type { FormFieldState, FormState, SubmitCandidate, UploadHint } from '../observation/form-state.js'
 import type { PageState } from '../observation/page-state.js'
+import { createDefaultTaskState, type TaskState } from '../task/task-state.js'
 import { normalizeLines, oneLine, truncateText } from './budget.js'
 import type { ContextFreshness, ContextRecentAction, ContextSnapshot, PromptSection, PromptSectionId } from './types.js'
 
@@ -7,6 +8,7 @@ export const PROMPT_SECTION_ORDER: PromptSectionId[] = [
   'SYSTEM_ROLE',
   'SAFETY_RULES',
   'TASK',
+  'TASK_STATE',
   'RESUME_SUMMARY',
   'CURRENT_PAGE_STATE',
   'CURRENT_FORM_STATE',
@@ -28,6 +30,7 @@ const DEFAULT_SECTION_MAX_CHARS: Record<PromptSectionId, number> = {
   SYSTEM_ROLE: 1400,
   SAFETY_RULES: 1800,
   TASK: 1400,
+  TASK_STATE: 900,
   RESUME_SUMMARY: 2200,
   CURRENT_PAGE_STATE: 1800,
   CURRENT_FORM_STATE: 2800,
@@ -39,6 +42,7 @@ const SECTION_TITLES: Record<PromptSectionId, string> = {
   SYSTEM_ROLE: 'SYSTEM_ROLE',
   SAFETY_RULES: 'SAFETY_RULES',
   TASK: 'TASK',
+  TASK_STATE: 'TASK_STATE',
   RESUME_SUMMARY: 'RESUME_SUMMARY',
   CURRENT_PAGE_STATE: 'CURRENT_PAGE_STATE',
   CURRENT_FORM_STATE: 'CURRENT_FORM_STATE',
@@ -92,6 +96,11 @@ function renderSectionContent(id: PromptSectionId, snapshot: ContextSnapshot): s
         `sessionId: ${snapshot.sessionId}`,
         `updatedAt: ${snapshot.updatedAt}`,
       ])
+    case 'TASK_STATE':
+      return renderTaskState(snapshot.taskState ?? createDefaultTaskState({
+        goal: snapshot.goal,
+        updatedAt: snapshot.updatedAt,
+      }))
     case 'RESUME_SUMMARY':
       return snapshot.resumeSummary || '(no resume summary provided)'
     case 'CURRENT_PAGE_STATE':
@@ -121,6 +130,20 @@ function renderSafetyRules(notes: string[], blockers: string[]): string {
   }
   lines.push(...(notes.length > 0 ? notes.map((note) => `- ${note}`) : ['- No additional safety notes were supplied.']))
   return lines.join('\n')
+}
+
+function renderTaskState(taskState: TaskState): string {
+  return normalizeLines([
+    `schemaVersion: ${taskState.schemaVersion}`,
+    `goal: ${taskState.goal}`,
+    `phase: ${taskState.phase}`,
+    'knownBlockers:',
+    renderStringList(taskState.knownBlockers),
+    '',
+    'completionCriteria:',
+    renderStringList(taskState.completionCriteria),
+    `updatedAt: ${taskState.updatedAt}`,
+  ])
 }
 
 function renderPageState(page: PageState | undefined, freshness: ContextFreshness | undefined): string {
@@ -245,6 +268,11 @@ function renderUploadHints(hints: UploadHint[]): string {
   return lines.join('\n')
 }
 
+function renderStringList(values: string[]): string {
+  if (values.length === 0) return '- (none)'
+  return values.slice(0, 16).map((value) => `- ${oneLine(value, 180)}`).join('\n')
+}
+
 function renderRecentActions(actions: ContextRecentAction[]): string {
   if (actions.length === 0) return '(none yet)'
   return prioritizeRecentActions(actions).map((action) => {
@@ -304,6 +332,7 @@ function fitSectionsToTotal(sections: PromptSection[], totalMaxChars?: number): 
     'CURRENT_PAGE_STATE',
     'CURRENT_FORM_STATE',
     'RESUME_SUMMARY',
+    'TASK_STATE',
     'TASK',
     'NEXT_ACTION_RULES',
     'SAFETY_RULES',

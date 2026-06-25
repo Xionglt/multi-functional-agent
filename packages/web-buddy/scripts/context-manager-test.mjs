@@ -42,6 +42,14 @@ try {
     submitCandidates: [{ tag: 'button', type: 'submit', text: 'Submit application', risk: 'L3', visible: true }],
     updatedAt: '2026-06-25T00:00:00.000Z',
   }
+  const taskState = {
+    schemaVersion: 'task-state/v1',
+    goal: 'Fill the current form.',
+    phase: 'filling',
+    knownBlockers: ['Email is missing'],
+    completionCriteria: ['Required fields are filled', 'Final submit is not clicked'],
+    updatedAt: '2026-06-25T00:00:30.000Z',
+  }
 
   const provider = {
     getPageState(sessionId) {
@@ -66,6 +74,7 @@ try {
     ],
     safetyNotes: ['Do not submit final applications.'],
     blockers: ['captcha not present'],
+    taskState,
     updatedAt: '2026-06-25T00:01:00.000Z',
   })
 
@@ -78,6 +87,7 @@ try {
   assert.deepEqual(snapshot.recentActions.map((action) => action.toolName), ['browser_type', 'browser_form_snapshot'])
   assert.equal(snapshot.safetyNotes[0], 'Do not submit final applications.')
   assert.equal(snapshot.blockers[0], 'captcha not present')
+  assert.deepEqual(snapshot.taskState, taskState)
   assert.equal(snapshot.freshness.staleAfterMs, 30_000)
   assert.equal(snapshot.freshness.pageStateUpdatedAt, pageState.updatedAt)
   assert.equal(snapshot.freshness.formStateUpdatedAt, formState.updatedAt)

@@ -6,6 +6,11 @@
 
 > English version is available below. See also the [full experience guide](./docs/full-experience-guide.md).
 
+## 包定位
+
+- `packages/web-buddy` 是项目主线：自研 Web Agent 核心、本地 runtime、Playwright browser tools、MCP server 和 Web UI 都在这里。
+- `packages/claude-code` 是恢复版 Claude Code runtime，只作为可选外部 runtime adapter 使用。
+
 ## 当前能力
 
 - ✅ **Web 控制台**：通过 `npm run web` 打开 Codex 风格的浏览器控制台，可配置模型、上传简历、启动任务、查看事件流、截图和 trace。
@@ -14,7 +19,7 @@
 - ✅ **可视化浏览器操作**：支持 headful Chromium、鼠标移动、点击高亮、输入高亮，方便观察 agent 具体做了什么。
 - ✅ **简历解析**：支持 PDF 简历，也支持 `.json` / `.txt`，解析为结构化 `ResumeProfile`。
 - ✅ **阿里巴巴职位匹配**：可抓取阿里岗位列表和详情，并根据简历做匹配。
-- ✅ **Claude Code runtime 阿里投递路径**：`npm run alibaba:apply` 会启动恢复版 Claude Code runtime（`packages/web-buddy`），并把 Playwright 暴露为 MCP server。
+- ✅ **Claude Code runtime 阿里投递路径**：`npm run alibaba:apply` 会启动恢复版 Claude Code runtime（`packages/claude-code`），并把 Playwright 暴露为 MCP server。
 - ✅ **Raw 对照路径**：`npm run alibaba:apply:raw` 保留本地 minimal Playwright agent loop，方便和 Claude runtime 做对比。
 - ✅ **人工交接**：登录、验证码、扫码、上传、保存、提交等关键步骤都会进入人工确认或人工处理。
 - ✅ **运行记录**：每一步操作、截图、URL、风险等级和工具调用记录在 `output/` 下。
@@ -27,19 +32,21 @@ multi-functional-agent/
 ├── configs/                       # 配置示例和简历示例
 ├── docs/                          # 迭代记录、优化方案、完整体验教程
 ├── packages/
-│   ├── web-buddy/                 # 恢复版 Claude Code runtime wrapper
-│   └── playwright-mcp/            # Agent engine + Playwright MCP server + CLI
-│       ├── src/core/              # agent-loop · tool-registry · page-view · login
-│       ├── src/sdk/               # orchestrator · llm · config · trace · human · resume · matcher · alibaba
-│       ├── src/cli/demo.ts        # fill / login / match / demo-form
-│       └── src/{browser,snapshot,session,policy,tools}
+│   ├── web-buddy/                 # 自研 Web Agent 核心 + Playwright MCP server + CLI
+│   │   ├── src/runtime/local/     # 自研本地 Web Agent loop · tool registry · page view · login
+│   │   ├── src/core/              # 旧路径兼容 re-export，不放新逻辑
+│   │   ├── src/sdk/               # orchestrator · llm · config · trace · human · resume · matcher · alibaba
+│   │   ├── scripts/adapters/      # Claude Code runtime 等外部 runtime 接入层
+│   │   ├── src/cli/demo.ts        # fill / login / match / demo-form
+│   │   └── src/{browser,snapshot,session,policy,tools}
+│   └── claude-code/               # 恢复版 Claude Code runtime，用作外部 runtime adapter
 └── output/                        # 运行 trace、截图、保存的 cookies（gitignored）
 ```
 
 ## 快速开始
 
 ```bash
-cd packages/playwright-mcp
+cd packages/web-buddy
 npm install
 npm run build
 
@@ -56,7 +63,7 @@ npm run fill -- https://your-recruiting-site.com/apply
 # 4. 阿里巴巴职位匹配（只读）
 npm run demo:match
 
-# 5. 阿里巴巴官方招聘网站：Claude Code runtime + Playwright MCP
+# 5. 阿里巴巴官方招聘网站：Claude Code runtime + Web Buddy MCP
 npm run alibaba:apply -- --resume /path/to/resume.pdf
 
 # 6. 本地 raw runtime 对照路径
@@ -142,7 +149,7 @@ browser_snapshot
 - [完整体验教程](./docs/full-experience-guide.md)：中英双语，从 clone 仓库到完整体验所有主要功能
 - [Web Agent Runtime v1.0.2 优化方案](./docs/web-agent-runtime-optimization-v1.0.2.md)：中英双语，速度、token、上下文、指标和 benchmark 方案
 - [Agent 迭代记录](./docs/agent-iteration-log.md)：每轮迭代背景、改动、验证和结论
-- [Playwright MCP README](./packages/playwright-mcp/README.md)：架构、CLI、环境变量和脚本说明
+- [Web Buddy README](./packages/web-buddy/README.md)：架构、CLI、环境变量和脚本说明
 - [配置示例](./configs/)：`agent.env.example`、`resume.example.json`
 - [Web Agent RFC](./docs/architecture/web-agent-bmad-rfc.md) / [Week-1 Plan](./docs/architecture/web-agent-week1-plan.md)
 
@@ -168,6 +175,11 @@ A **generic, visual browser job-application agent**. Give it any recruitment sit
 
 The project is not intended to hardcode one specific recruiting workflow. The goal is to build a general Web Agent runtime: Playwright MCP controls the browser, the model makes decisions, and the runtime handles safety, context, trace, human handoff, and future performance optimization.
 
+## Package Roles
+
+- `packages/web-buddy` is the main project line: the self-owned Web Agent core, local runtime, Playwright browser tools, MCP server, and Web UI live here.
+- `packages/claude-code` is the recovered Claude Code runtime, kept as an optional external runtime adapter.
+
 ## What Works
 
 - ✅ **Web UI**: `npm run web` opens a Codex-style dashboard for model config, resume upload, live events, screenshots, and traces.
@@ -176,7 +188,7 @@ The project is not intended to hardcode one specific recruiting workflow. The go
 - ✅ **Visual browser actions**: headful Chromium, mouse movement, click highlights, and typing highlights.
 - ✅ **Resume parsing**: PDF, `.json`, and `.txt` resumes are parsed into `ResumeProfile`.
 - ✅ **Alibaba match**: scrape Alibaba job lists/details and match jobs to the resume.
-- ✅ **Claude Code runtime Alibaba runner**: `npm run alibaba:apply` runs the recovered Claude Code runtime (`packages/web-buddy`) with Playwright exposed as MCP.
+- ✅ **Claude Code runtime Alibaba runner**: `npm run alibaba:apply` runs the recovered Claude Code runtime (`packages/claude-code`) with Playwright exposed as MCP.
 - ✅ **Raw comparison runner**: `npm run alibaba:apply:raw` keeps the local minimal Playwright agent loop for comparison.
 - ✅ **Human-in-the-loop**: login, captcha, QR scan, upload, save, and submit steps are handed to the user.
 - ✅ **Trace**: run steps, screenshots, URLs, risk tiers, and tool calls are recorded under `output/`.
@@ -185,7 +197,7 @@ The project is not intended to hardcode one specific recruiting workflow. The go
 ## Quick Start
 
 ```bash
-cd packages/playwright-mcp
+cd packages/web-buddy
 npm install
 npm run build
 
@@ -242,7 +254,7 @@ Do not commit `.env`, cookies, storage state, raw resume content, or verificatio
 - [Full experience guide](./docs/full-experience-guide.md): bilingual setup and walkthrough for trying every major feature
 - [Web Agent Runtime v1.0.2 optimization plan](./docs/web-agent-runtime-optimization-v1.0.2.md): bilingual performance, token, context, metrics, and benchmark plan
 - [Agent iteration log](./docs/agent-iteration-log.md): iteration notes, run conclusions, and next steps
-- [Playwright MCP README](./packages/playwright-mcp/README.md): architecture, CLI, env, and scripts
+- [Web Buddy README](./packages/web-buddy/README.md): architecture, CLI, env, and scripts
 - [Config examples](./configs/)
 
 ## License

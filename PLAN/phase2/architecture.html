@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Phase 2 Agent Kernel 架构图</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f7f3;
+      --panel: #ffffff;
+      --text: #1f2428;
+      --muted: #667085;
+      --line: #deded8;
+      --accent: #2563eb;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family:
+        ui-sans-serif,
+        system-ui,
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif;
+      line-height: 1.55;
+    }
+
+    header {
+      padding: 40px 32px 24px;
+      border-bottom: 1px solid var(--line);
+      background: #fbfbf8;
+    }
+
+    main {
+      width: min(1400px, calc(100vw - 48px));
+      margin: 0 auto;
+      padding: 28px 0 56px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 20px;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0;
+      color: var(--muted);
+      max-width: 980px;
+    }
+
+    section {
+      margin: 24px 0;
+      padding: 24px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: auto;
+    }
+
+    .hint {
+      margin-top: 10px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .mermaid {
+      min-width: 1500px;
+      margin: 0;
+      padding: 16px 0;
+      text-align: center;
+    }
+
+    .summary {
+      border-left: 4px solid var(--accent);
+    }
+
+    code {
+      font-family:
+        ui-monospace,
+        SFMono-Regular,
+        Menlo,
+        Monaco,
+        Consolas,
+        monospace;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Phase 2 Agent Kernel 架构图</h1>
+    <p>这份页面会直接渲染 Mermaid 图。用浏览器打开本文件即可查看，不需要 Markdown 预览插件。</p>
+    <p class="hint">如果图没有出现，通常是浏览器无法加载 Mermaid CDN；可以换在线环境，或后续再生成静态 SVG/PNG。</p>
+  </header>
+
+  <main>
+    <section>
+      <h2>1. 总体架构</h2>
+      <pre class="mermaid">
+flowchart TB
+  User[用户]
+
+  subgraph Surface[产品入口层]
+    WebUI[Task Cockpit Web UI]
+    CLI[CLI / Demo]
+    SDK[SDK API]
+  end
+
+  User --> WebUI
+  User --> CLI
+  User --> SDK
+
+  subgraph Kernel[Agent Kernel 核心层]
+    AgentKernel[AgentKernel]
+    QueryLoop[QueryLoop / Turn Loop]
+    RunController[RunController<br/>pause / resume / abort / stop]
+    TokenBudget[TokenBudget<br/>context / tool result budget]
+    KernelEvents[KernelEvent Stream]
+  end
+
+  WebUI --> AgentKernel
+  CLI --> AgentKernel
+  SDK --> AgentKernel
+  AgentKernel --> QueryLoop
+  AgentKernel --> RunController
+  QueryLoop --> TokenBudget
+  QueryLoop --> KernelEvents
+
+  subgraph PromptLayer[上下文与提示层]
+    ContextManager[ContextManager<br/>working set]
+    PromptAssembler[PromptAssembler]
+    Compaction[Context Compaction<br/>long task summary]
+    SkillsContext[Skill Context Injection]
+    MemoryContext[Memory Context Injection]
+  end
+
+  subgraph ModelLayer[模型层]
+    LlmGateway[LlmGateway]
+    Provider[Model Provider<br/>OpenAI / compatible APIs]
+  end
+
+  subgraph ToolLayer[工具执行层]
+    ToolRegistry[ToolRegistry]
+    ToolExecution[ToolExecutionService]
+    ToolContext[ToolUseContext]
+    ToolErrors[Tool Error Normalizer]
+  end
+
+  subgraph PermissionLayer[权限层]
+    PolicyEngine[PolicyEngine<br/>risk evaluation]
+    PermissionEngine[PermissionEngine<br/>allow / ask / deny]
+    ApprovalQueue[ApprovalQueue]
+    HumanGate[HumanGate]
+  end
+
+  subgraph WorkflowLayer[工作流层]
+    WorkflowEngine[WorkflowEngine]
+    WorkflowDefinition[WorkflowDefinition]
+    WorkflowInstance[WorkflowInstance Snapshot]
+    Evidence[Workflow Evidence]
+    Guards[Workflow Guards]
+  end
+
+  subgraph StateLayer[状态事实源]
+    SessionStore[SessionStore]
+    Transcript[transcript.jsonl]
+    WorkflowStore[WorkflowStore]
+    PermissionStore[PermissionStore]
+    MemoryStore[MemoryStore]
+  end
+
+  subgraph SkillLayer[技能层]
+    SkillRegistry[SkillRegistry]
+    SkillLoader[SkillLoader]
+    SkillRecommender[SkillRecommender]
+    JobSkill[job-application skill]
+    AlibabaSkill[alibaba-careers skill]
+    ResearchSkill[web-research skill]
+  end
+
+  subgraph WebDomain[Web 垂直执行域]
+    BrowserTools[Browser Tools<br/>open / click / fill / upload / snapshot]
+    Observation[ObservationManager<br/>PageState / FormState]
+    Snapshot[Snapshot / Ref Resolver]
+    BrowserSupervisor[BrowserSupervisor<br/>dialog / popup / stale ref]
+  end
+
+  subgraph Observability[观测与报告层]
+    Trace[AgentTrace / TraceRecorder]
+    Metrics[Metrics]
+    SafetyReport[Safety Report]
+    Benchmarks[Benchmarks / Eval]
+    Doctor[Doctor]
+  end
+
+  QueryLoop --> PromptAssembler
+  QueryLoop --> LlmGateway
+  QueryLoop --> ToolExecution
+  QueryLoop --> WorkflowEngine
+  QueryLoop --> PermissionEngine
+  QueryLoop --> SessionStore
+
+  ContextManager --> PromptAssembler
+  Compaction --> PromptAssembler
+  SkillsContext --> PromptAssembler
+  MemoryContext --> PromptAssembler
+  SkillLayer --> SkillsContext
+  SkillLayer --> WorkflowDefinition
+  MemoryStore --> MemoryContext
+
+  LlmGateway --> Provider
+
+  ToolExecution --> ToolRegistry
+  ToolExecution --> ToolContext
+  ToolExecution --> ToolErrors
+  ToolExecution --> BrowserTools
+  BrowserTools --> BrowserSupervisor
+  BrowserTools --> Observation
+  BrowserTools --> Snapshot
+  Snapshot --> Observation
+  Observation --> ContextManager
+  Observation --> Evidence
+
+  PolicyEngine --> PermissionEngine
+  PermissionEngine --> ApprovalQueue
+  ApprovalQueue --> HumanGate
+  HumanGate --> WebUI
+
+  WorkflowEngine --> WorkflowDefinition
+  WorkflowEngine --> WorkflowInstance
+  WorkflowEngine --> Evidence
+  WorkflowEngine --> Guards
+  WorkflowEngine --> WorkflowStore
+
+  SessionStore --> Transcript
+  SessionStore --> WorkflowStore
+  SessionStore --> PermissionStore
+  SessionStore --> MemoryStore
+
+  KernelEvents --> WebUI
+  KernelEvents --> CLI
+  KernelEvents --> Trace
+  KernelEvents --> Metrics
+  Trace --> SafetyReport
+  Metrics --> SafetyReport
+  Doctor --> WebUI
+  Benchmarks --> Trace
+  Benchmarks --> Metrics
+      </pre>
+    </section>
+
+    <section>
+      <h2>2. 一次任务的运行流</h2>
+      <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant U as 用户
+  participant UI as Task Cockpit / CLI / SDK
+  participant K as AgentKernel
+  participant S as SessionStore
+  participant SK as SkillSystem
+  participant C as ContextManager
+  participant L as LlmGateway
+  participant P as PermissionEngine
+  participant T as ToolExecutionService
+  participant W as WorkflowEngine
+  participant O as ObservationManager
+  participant R as Trace / Metrics
+
+  U->>UI: 发起任务 goal
+  UI->>K: start(goal, mode, options)
+  K->>S: create session
+  K->>SK: recommend skills(goal, domain, workflow)
+  SK-->>K: skill context
+  K->>C: build working context
+  C-->>K: prompt sections
+  K->>L: model turn(messages + context)
+  L-->>K: assistant message / tool calls
+  K->>S: append assistant/tool_call
+  K->>P: evaluate permission(tool call, workflow, policy)
+
+  alt allow
+    P-->>K: allow
+  else ask
+    P-->>UI: approval request
+    U->>UI: approve / reject
+    UI-->>P: decision
+    P-->>K: allow or deny
+  else deny
+    P-->>K: deny
+  end
+
+  alt permission allow
+    K->>T: execute tool(call, ToolUseContext)
+    T->>O: browser action / snapshot / page state
+    O-->>T: PageState / FormState / evidence candidate
+    T-->>K: tool result
+    K->>W: transition + add evidence
+    W-->>K: workflow snapshot
+    K->>S: append tool_result + workflow_snapshot
+    K->>R: emit trace/metrics
+  else permission deny
+    K->>W: mark blocked / denied
+    K->>S: append permission_decision + blocked snapshot
+  end
+
+  K->>K: check stop / continue / compact
+
+  alt completed with evidence
+    K->>S: mark completed
+    K-->>UI: completed + evidence
+  else blocked
+    K->>S: mark blocked
+    K-->>UI: blocked + resume point
+  else continue
+    K->>C: rebuild context
+  end
+      </pre>
+    </section>
+
+    <section>
+      <h2>3. 模块边界</h2>
+      <pre class="mermaid">
+flowchart LR
+  Goal[用户目标] --> Kernel[AgentKernel]
+
+  Kernel --> Decision[LLM 决策]
+  Kernel --> Session[Session<br/>发生了什么]
+  Kernel --> Workflow[Workflow<br/>任务到了哪一步]
+  Kernel --> Permission[Permission<br/>动作能不能做]
+  Kernel --> ToolLife[Tool Lifecycle<br/>怎么执行/失败/重试]
+  Kernel --> Context[Context Budget<br/>该给模型看什么]
+
+  Decision --> NextAction[下一步动作建议]
+  NextAction --> Permission
+  Permission --> ToolLife
+  ToolLife --> Observation[观察外部世界]
+  Observation --> Workflow
+  Workflow --> Session
+  Session --> Context
+  Context --> Decision
+      </pre>
+    </section>
+
+    <section>
+      <h2>4. Phase 2 落地顺序</h2>
+      <pre class="mermaid">
+flowchart TD
+  A[2A SessionStore + KernelEvent] --> B[2B AgentKernel Skeleton]
+  B --> C[2C ToolExecutionService + ToolUseContext]
+  C --> D[2D PermissionEngine + ApprovalQueue]
+  D --> E[2E Context Compaction + TokenBudget]
+  E --> F[2F WorkflowEngine + Evidence]
+  F --> G[2G SkillSystem v1]
+  G --> H[2H Task Cockpit UI]
+  H --> I[2I Doctor + Eval]
+
+  A -.支撑.-> F
+  A -.支撑.-> H
+  C -.支撑.-> D
+  C -.支撑.-> F
+  F -.支撑.-> G
+  D -.支撑.-> H
+      </pre>
+    </section>
+
+    <section>
+      <h2>5. 当前项目到 Phase 2 的迁移关系</h2>
+      <pre class="mermaid">
+flowchart TB
+  subgraph Current[当前结构]
+    OldLoop[runtime/local/agent-loop.ts]
+    OldRuntime[agent/agent-runtime.ts]
+    OldTools[ToolRegistry + ToolExecutionBoundary]
+    OldPolicy[PolicyEngine]
+    OldWorkflow[WorkflowState + transitionWorkflowState]
+    OldContext[ContextManager + PromptAssembler]
+    OldTrace[Trace / Metrics / Safety Report]
+    OldWeb[web/server.ts in-memory runs]
+    OldOrchestrator[sdk/orchestrator.ts]
+  end
+
+  subgraph Target[Phase 2 目标结构]
+    NewKernel[kernel/AgentKernel + QueryLoop]
+    NewSession[session/SessionStore + transcript]
+    NewTools[tools/ToolExecutionService + ToolUseContext]
+    NewPermission[permission/PermissionEngine + ApprovalQueue]
+    NewWorkflow[workflow/WorkflowEngine + Evidence]
+    NewSkills[skills/SkillSystem]
+    NewCockpit[web/Task Cockpit]
+    NewTrace[Trace remains observability only]
+  end
+
+  OldLoop --> NewKernel
+  OldRuntime --> NewKernel
+  OldTools --> NewTools
+  OldPolicy --> NewPermission
+  OldWorkflow --> NewWorkflow
+  OldContext --> NewKernel
+  OldTrace --> NewTrace
+  OldWeb --> NewCockpit
+  OldOrchestrator --> NewSkills
+  OldOrchestrator --> NewWorkflow
+  NewKernel --> NewSession
+      </pre>
+    </section>
+
+    <section>
+      <h2>6. 最关键的状态边界</h2>
+      <pre class="mermaid">
+flowchart LR
+  Trace[Trace<br/>审计事实] -.不能作为运行状态.-> Runtime[Runtime Decision]
+
+  Session[SessionStore<br/>恢复事实源] --> Runtime
+  Workflow[WorkflowStore<br/>任务状态事实源] --> Runtime
+  Permission[PermissionStore<br/>权限事实源] --> Runtime
+  Observation[ObservationManager<br/>当前页面事实源] --> Runtime
+
+  Runtime --> Trace
+      </pre>
+    </section>
+
+    <section class="summary">
+      <h2>一句话</h2>
+      <p>Phase 2 要先补 Agent 的中枢神经系统：Session 让它记得住，Kernel 让它控得住，Permission 让它不乱动，Workflow 让它知道做到哪了，Skill 让它下次别从零开始。</p>
+    </section>
+  </main>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+
+    mermaid.initialize({
+      startOnLoad: true,
+      securityLevel: "loose",
+      theme: "base",
+      themeVariables: {
+        fontFamily: "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
+        fontSize: "18px",
+        primaryColor: "#eef4ff",
+        primaryTextColor: "#1f2428",
+        primaryBorderColor: "#9db7f5",
+        lineColor: "#667085",
+        secondaryColor: "#f8fafc",
+        tertiaryColor: "#fff7ed",
+        noteBkgColor: "#fff7ed",
+        noteTextColor: "#1f2428",
+        clusterBkg: "#fafafa",
+        clusterBorder: "#d0d5dd"
+      },
+      flowchart: {
+        htmlLabels: true,
+        curve: "basis",
+        padding: 16
+      },
+      sequence: {
+        mirrorActors: false,
+        showSequenceNumbers: true
+      }
+    });
+  </script>
+</body>
+</html>

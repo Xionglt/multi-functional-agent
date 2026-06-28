@@ -57,14 +57,16 @@ npx playwright install chromium
 
 ### 4. 先跑不需要 Key 的离线 demo
 
-离线 demo 使用本地 mock 表单，不访问真实招聘网站，适合验证浏览器、构建、trace 是否正常。
+离线 demo 使用本地 fixture，不访问真实招聘网站，适合验证浏览器、构建、trace、metrics 和 safety report 是否正常。
 
 ```bash
 cd packages/web-buddy
-npm run demo
+npm run demo:form
+npm run demo:research
+npm run report:safety
 ```
 
-你应该能看到一个 Chromium 窗口打开本地 mock 表单，并看到 agent 尝试填写字段。
+`demo:form` 会打开本地 mock 表单并尝试填写字段；`demo:research` 会打开本地只读产品/文档页，生成结构化 `research-summary.json`、trace 和 metrics。
 
 也可以跑基础测试：
 
@@ -72,6 +74,7 @@ npm run demo
 npm run test:smoke
 npm run test:resume
 npm run test:agent-loop
+npm run benchmark:research
 ```
 
 ### 5. 配置模型 Key
@@ -280,6 +283,10 @@ output/
 output/<runId>/trace.jsonl
 output/<runId>/summary.json
 output/<runId>/shot-*.png
+output/sessions/<sessionId>/session.json
+output/sessions/<sessionId>/transcript.jsonl
+output/sessions/<sessionId>/events.jsonl
+output/sessions/<sessionId>/workflow.json
 output/claude-runtime/<timestamp>/run-events.log
 output/claude-runtime/<timestamp>/stdout.log
 output/claude-runtime/<timestamp>/stderr.log
@@ -287,15 +294,23 @@ output/claude-runtime/<timestamp>/mcp.playwright.json
 output/traces/<traceId>/session.json
 output/traces/<traceId>/spans.jsonl
 output/traces/<traceId>/events.jsonl
+output/traces/<traceId>/metrics.json
+output/traces/<traceId>/safety-report.json
+output/traces/<traceId>/artifacts/page-state-latest.json
+output/traces/<traceId>/artifacts/form-state-latest.json
 ```
 
 排查问题时优先看：
 
-1. `run-events.log`
-2. `stdout.log`
-3. `stderr.log`
-4. `spans.jsonl`
-5. 最后的截图
+1. `output/sessions/<sessionId>/session.json`
+2. `output/sessions/<sessionId>/transcript.jsonl`
+3. `run-events.log`
+4. `stdout.log`
+5. `stderr.log`
+6. `metrics.json`
+7. `safety-report.json`
+8. `spans.jsonl`
+9. 最后的截图
 
 ### 13. 安全注意事项
 
@@ -304,6 +319,7 @@ output/traces/<traceId>/events.jsonl
 - 真实招聘网站测试请使用你有权操作的账号和简历。
 - 首次测试建议先用 `--dry-run` 或离线 demo。
 - 真实投递相关动作会受到 runtime、工具和人工交接逻辑影响，但你仍然应该在浏览器里观察关键步骤。
+- Safety Model 详见 [`docs/safety-model.md`](./safety-model.md)。
 
 ### 14. 常见问题
 
@@ -450,14 +466,16 @@ npx playwright install chromium
 
 ### 4. Run the Offline Demo Without a Key
 
-The offline demo uses a local mock form. It does not touch a real recruiting website and is the safest first check.
+The offline demos use local fixtures. They do not touch a real recruiting website, and they are the safest first check for browser control, trace, metrics, and safety reports.
 
 ```bash
 cd packages/web-buddy
-npm run demo
+npm run demo:form
+npm run demo:research
+npm run report:safety
 ```
 
-You should see Chromium open a mock form and the agent attempt to fill it.
+`demo:form` opens a local mock form and attempts to fill fields. `demo:research` opens a local read-only product/docs page and writes `research-summary.json`, trace, and metrics.
 
 You can also run basic tests:
 
@@ -465,6 +483,7 @@ You can also run basic tests:
 npm run test:smoke
 npm run test:resume
 npm run test:agent-loop
+npm run benchmark:research
 ```
 
 ### 5. Configure a Model Key
@@ -664,6 +683,10 @@ Common files:
 output/<runId>/trace.jsonl
 output/<runId>/summary.json
 output/<runId>/shot-*.png
+output/sessions/<sessionId>/session.json
+output/sessions/<sessionId>/transcript.jsonl
+output/sessions/<sessionId>/events.jsonl
+output/sessions/<sessionId>/workflow.json
 output/claude-runtime/<timestamp>/run-events.log
 output/claude-runtime/<timestamp>/stdout.log
 output/claude-runtime/<timestamp>/stderr.log
@@ -671,15 +694,23 @@ output/claude-runtime/<timestamp>/mcp.playwright.json
 output/traces/<traceId>/session.json
 output/traces/<traceId>/spans.jsonl
 output/traces/<traceId>/events.jsonl
+output/traces/<traceId>/metrics.json
+output/traces/<traceId>/safety-report.json
+output/traces/<traceId>/artifacts/page-state-latest.json
+output/traces/<traceId>/artifacts/form-state-latest.json
 ```
 
 For debugging, check in this order:
 
-1. `run-events.log`
-2. `stdout.log`
-3. `stderr.log`
-4. `spans.jsonl`
-5. final screenshot
+1. `output/sessions/<sessionId>/session.json`
+2. `output/sessions/<sessionId>/transcript.jsonl`
+3. `run-events.log`
+4. `stdout.log`
+5. `stderr.log`
+6. `metrics.json`
+7. `safety-report.json`
+8. `spans.jsonl`
+9. final screenshot
 
 ### 13. Safety Notes
 
@@ -688,6 +719,7 @@ For debugging, check in this order:
 - Use real recruiting websites only with accounts and resumes you are allowed to operate.
 - Start with `--dry-run` or the offline demo.
 - Watch the browser during important real-site steps.
+- See [`docs/safety-model.md`](./safety-model.md) for the full safety model.
 
 ### 14. Troubleshooting
 

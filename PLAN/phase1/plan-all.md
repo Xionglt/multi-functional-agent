@@ -1,6 +1,6 @@
 # Web Agent Platform Master Plan
 
-日期：2026-06-25
+日期：2026-06-26
 
 ## 0. 计划定位
 
@@ -20,14 +20,22 @@
 
 ### 0.1 当前落地状态快照
 
-截至 2026-06-25：
+截至 2026-06-26：
 
 - `packages/web-buddy` 已确认为项目主线：自研 Web Agent 核心、Playwright browser tools、MCP server、Web UI、本地 local runtime。
 - `packages/claude-code` 是恢复版 Claude Code runtime，只作为可选外部 runtime adapter。
+- Plan0 已完成：项目命名和主线整理，明确 `packages/web-buddy` 是自研 Web Agent 主线，`packages/claude-code` 是外部 runtime adapter / 对照。
 - Plan1 已完成：run identity、legacy trace、agent-trace、metrics.json、agent-state.json、Web UI metrics、benchmark-simple 基线。
 - Plan2 已完成：Tool Catalog、local adapter、MCP adapter、PageState、FormState、ObservationManager、tool category metrics、benchmark-simple observation assertions。
-- 当前下一阶段是 Plan3：ContextManager / Prompt Sections v1。
-- Trace / metrics / artifacts 是旁路观测输出，不是主流程状态数据库。后续 ContextManager 必须读取 ObservationManager / ObservationProvider 内存态，不得读取 trace artifacts 作为运行时上下文。
+- Plan3 已完成：ContextManager、Prompt Sections、recentActions、prompt budget、ContextSnapshot，从 ObservationProvider 内存态读取 PageState/FormState，不读取 trace artifacts。
+- Phase 4A 已完成：AgentRuntime facade、PromptAssembler、StopConditionManager，`AgentRuntime.run()` 仍兼容性委托 `runAgentLoop`。
+- Phase 4B 已完成：context selection metrics、freshness metadata、minimal TaskState、complex local benchmark。
+- Phase 4C 已完成：ToolExecutionBoundary、PolicyDecision helper、freshness-aware high-risk cue、agent-loop 最小接入，`runAgentLoop` / `ToolRegistry` 对外接口保持兼容。
+- Phase 4D 已完成：WorkflowState v1、WorkflowTransition helper、`WORKFLOW_STATE` prompt section、workflow-aware PolicyDecision、agent-loop workflow working set、AgentRuntime workflow-aware result。`Apply / 投递` 已可结合 workflow phase 区分 apply entry 与 final submit。
+- Phase 5 已完成第一版：PolicyDecision helper 已升级为兼容式 `PolicyEngine` facade，已补充 policy audit event、policy metrics aggregation、safety report v1 helper 和 `test:mvp` 验证入口。
+- Phase 5B 已完成第一版：新增 read-only `demo-research` / `benchmark:research`，补充显式 `report:safety` 入口，README / Quickstart 已改为通用 local auditable Web Agent runtime 定位，并新增 `docs/safety-model.md`。
+- 当前下一阶段可以继续打磨 MVP Packaging 的 Web UI 入口和 examples 索引；Phase 6 WorkflowEngine / SkillSystem 仍暂缓，等开源 MVP 展示路径稳定后再启动。
+- Trace / metrics / artifacts 是旁路观测输出，不是主流程状态数据库。Runtime / ContextManager / PromptAssembler / policy / tool execution / workflow state 都不得读取 trace artifacts 作为运行时上下文。
 
 ---
 
@@ -76,15 +84,23 @@ scripts/adapters/claude-code/alibaba-apply.mjs
 - `docs/web-agent-runtime-v1.0.2-implementation-plan.md` 已经把 metrics、AgentState、ContextBudget、benchmark 的链路想清楚了一部分。
 - `src/tools/catalog.ts` 已经成为 Tool Catalog v1；local runtime 和 MCP server 通过 thin adapter 共享定义层工具 contract。
 - `src/observation/` 已经有 PageState / FormState / ObservationManager v1。
-- `benchmark-simple` 已经断言 metrics、agent-state、PageState/FormState schema 和最终 filled fields。
+- `src/context/` 已经有 ContextManager、Prompt Sections、budget、context metrics，且读取 ObservationProvider 内存态而不是 trace artifacts。
+- `src/task/task-state.ts` 已经提供 minimal TaskState，并进入 prompt section。
+- `src/agent/` 已经有 AgentRuntime facade、PromptAssembler、StopConditionManager。
+- `src/tools/tool-execution.ts` 已经有轻量 ToolExecutionBoundary，agent-loop 工具执行调用点已通过该边界委托 ToolRegistry。
+- `src/policy/agent-policy.ts` 已经成为兼容 facade，`src/policy/policy-engine.ts` 提供 PolicyEngine v1，覆盖 gate kind、final submit、raw auto-confirm、stale freshness cue、workflow-aware apply entry / final submit 区分，并输出稳定 `policyCode` / `ruleId` / audit tags。
+- `src/policy/policy-audit.ts` / `src/policy/safety-report.ts` 已经提供第一版 policy audit event 和 safety report 旁路分析。
+- `src/workflow/` 已经有 WorkflowState v1 和 WorkflowTransition helper；agent-loop 会维护 workflow working set，并在 login/captcha/final submit/agent_done 等节点更新状态。
+- `benchmark-simple` / `benchmark-complex` 已经断言 metrics、agent-state、PageState/FormState schema、context metrics 和复杂表单填写路径。
 
 ### 1.3 当前主要约束
 
 - `runtime/local/agent-loop.ts` 同时承担 prompt、context、LLM call、tool execution、gate、trace、observation refresh、stop condition。
 - `sdk/orchestrator.ts` 仍偏 job-application oriented，mode 分支会随着场景增加而变重。
-- Tool Catalog 已完成定义层统一，但执行层仍然是 local adapter / MCP adapter 两条薄执行路径；单一 ToolExecutionService 尚未做，且不应在 ContextManager 阶段做。
-- 已有 `PageState` / `FormState`，但尚缺 `TaskState`。
-- 缺少独立 `ContextManager`，长任务依赖 messages 追加和 observation 截断。
+- Tool Catalog 已完成定义层统一，ToolExecutionBoundary 已完成 local runtime 的轻量执行边界；但完整 ToolExecutionService、local/MCP 统一执行调度、队列、重试、streaming 仍未做。
+- 已有 `PageState` / `FormState` / `TaskState` / `WorkflowState`，但 WorkflowState 仍是 runtime working set，不是可恢复 WorkflowEngine。
+- ContextManager / PromptAssembler 已完成第一版，`WORKFLOW_STATE` 已进入 prompt；后续需要通过 policy audit / benchmark 继续证明 prompt 和 gate 没有退化。
+- PolicyEngine / policy audit / policy metrics / safety report 已完成第一版；下一步重点不是继续扩展 policy DSL，而是把这些能力打包进清晰的 MVP 文档、demo 和验证入口。
 - Skill 目前更像站点逻辑散落在 SDK 中，Alibaba 还不是可插拔 skill。
 - Metrics / trace / agent-state 已成为基础闭环；后续重点是用 benchmark 防止行为退化。
 
@@ -710,36 +726,31 @@ src/observation/
 
 ---
 
-## Phase 3: ContextManager / Prompt Sections（当前下一阶段）
+## Phase 3: ContextManager / Prompt Sections（已完成于 Plan3）
 
 目标：
 
 > 所有进入模型的内容经过 section 化和预算控制，并从 ObservationManager / ObservationProvider 内存态读取 PageState/FormState。
 
-要做：
+已完成：
 
 - 新增 `ObservationProvider` 接口。
 - 新增 `ContextManager`。
 - 新增 `PromptSection`。
-- 新增字符预算第一版。
+- 新增字符预算和 section selection。
 - agent-loop 内维护 recentActions 内存数组。
 - 默认 prompt 不再混杂完整 resume、snapshot、history。
-- 将上下文拆成：
-
-```text
-SYSTEM_ROLE
-SAFETY_RULES
-TASK
-RESUME_SUMMARY
-CURRENT_PAGE_STATE
-CURRENT_FORM_STATE
-RECENT_ACTIONS
-NEXT_ACTION_RULES
-```
-
+- 将上下文拆成稳定 prompt sections。
 - 工具 observation 回填后维护 recentActions 摘要。
 - 保留 pageView fallback。
 - 保留 `runAgentLoop` 兼容入口。
+
+后续 Phase 4B 已补充：
+
+- `TASK_STATE` section。
+- PageState / FormState freshness cue。
+- context selection metrics。
+- tight budget priority tests。
 
 严格禁止：
 
@@ -748,135 +759,366 @@ ContextManager -> readFileSync(output/traces/.../page-state-latest.json)
 ContextManager -> readFileSync(output/traces/.../form-state-latest.json)
 ```
 
-目标结构：
+验收状态：
 
-```text
-src/context/
-  types.ts
-  context-manager.ts
-  budget.ts
-  prompt-sections.ts
-```
-
-验收：
-
-- ContextManager 可用 mock ObservationProvider 测试。
-- Prompt sections 顺序稳定。
-- PageState/FormState summary 进入 prompt。
-- filledFields / missingRequired / submitCandidates 进入 prompt。
-- 长 page text / recent actions 受预算控制。
-- demo-form / raw / fill 行为不退化。
-- benchmark-simple 不退化。
-- `rg "page-state-latest|form-state-latest|output/traces|readFileSync" packages/web-buddy/src/context packages/web-buddy/src/runtime/local` 不应显示 ContextManager / agent-loop 读取 trace artifacts。
-
-串行依赖：
-
-- 依赖 PageState/FormState，否则 ContextManager 只是字符串裁剪器。
-
-并行任务：
-
-- Resume summary / resume fields 可并行。
+- `npm run test:context` 通过。
+- `npm run test:prompt-sections` 通过。
+- `npm run test:metrics` 通过。
+- `npm run benchmark:simple` 通过。
+- `npm run benchmark:complex` 通过。
+- ContextManager / PromptAssembler 不读取 trace artifacts。
 
 ---
 
-## Phase 4: AgentRuntime Skeleton
+## Phase 4A: AgentRuntime Skeleton（已完成于 Plan4）
 
 目标：
 
-> 把当前 `runAgentLoop` 升级为可扩展 AgentRuntime，但保持兼容。
+> 把当前 `runAgentLoop` 包装成可演进 AgentRuntime，但保持兼容。
 
-要做：
+已完成：
 
-- 新增 `AgentRuntime` 包装当前 loop。
+- 新增 `AgentRuntime` facade。
 - 抽出 `PromptAssembler`。
-- 抽出 `LoopController`。
 - 抽出 `StopConditionManager`。
-- Tool 执行改走 `ToolExecutionService`。
-- Gate 判断改走 `PolicyEngine` 的第一版接口。
-- 保留 `runAgentLoop` 作为兼容 facade。
+- 保留 `runAgentLoop` 作为兼容入口。
+- `AgentRuntime.run()` 第一版仍内部委托 `runAgentLoop`。
 
 目标结构：
 
 ```text
 src/agent/
-  runtime.ts
-  loop-controller.ts
+  agent-runtime.ts
   prompt-assembler.ts
   stop-condition.ts
   types.ts
 ```
 
-验收：
+验收状态：
 
 - 旧 API `runAgentLoop` 仍可用。
-- `orchestrator.ts` 可以逐步切到 `AgentRuntime.run()`。
-- trace 中能区分 LLM call、tool call、policy gate、observation refresh。
+- `AgentRuntime.run()` 可跑通 mock LLM 流程。
+- PromptAssembler / StopConditionManager 有独立边界。
 - `npm run test:agent-loop` 通过。
-
-串行依赖：
-
-- 依赖 ContextManager 和 Tool Unification。
-
-并行任务：
-
-- StopCondition 和 PromptAssembler 可并行抽。
+- `npm run test:agent-runtime` 通过。
 
 ---
 
-## Phase 5: Policy Engine v1
+## Phase 4B: Context Metrics / Freshness / TaskState（已完成于 Plan5）
 
 目标：
 
-> 将 risk/gate 从 loop 内逻辑升级为独立系统。
+> 让 ContextManager / Prompt Sections 的筛选行为可度量，让模型知道 PageState / FormState 是否新鲜，并加入最小 TaskState。
 
-要做：
+已完成：
 
-- 抽出 `PolicyEngine`。
-- 抽出 `PermissionManager`。
-- 抽出 `HumanGateManager` 或复用 `sdk/human.ts` 但通过 policy 调用。
-- 将 L0-L4 风险理由写入 trace。
-- 生成 safety report 第一版。
-- 外部 final submit 默认阻断。
+- `ContextSnapshot.freshness`。
+- Prompt 中渲染 page/form freshness cue。
+- `TaskState` 和 `TASK_STATE` prompt section。
+- context selection metrics 进入 trace event。
+- metrics aggregator 汇总 context metrics。
+- benchmark-complex 本地复杂表单基线。
 
 目标结构：
 
 ```text
-src/policy/
-  policy-engine.ts
-  risk-classifier.ts
-  permission-manager.ts
-  human-gate-manager.ts
-  audit.ts
-  rules/
+src/context/
+  metrics.ts
+src/task/
+  task-state.ts
 ```
 
-验收：
+验收状态：
 
-- L3/L4 动作都经过统一 policy。
-- final submit、upload、credential/captcha 都有明确 risk reason。
-- Safety report 可从 trace/metrics 生成。
-
-串行依赖：
-
-- 依赖 AgentRuntime Skeleton，因为 policy 要接入工具执行链。
-
-并行任务：
-
-- policy rule fixtures 可与 WorkflowEngine 设计并行。
+- `npm run test:context` 通过。
+- `npm run test:prompt-sections` 通过。
+- `npm run test:metrics` 通过。
+- `npm run benchmark:complex` 通过。
+- 旧 trace 缺失 context metrics 时默认安全。
 
 ---
 
-## Phase 6: Workflow Engine v1
+## Phase 4C: Tool Execution Boundary / Policy Skeleton（已完成于 Plan6）
 
 目标：
 
-> 从 mode 分支演进为本地可恢复 workflow。
+> 在不重写 runtime 主循环的前提下，新增轻量 ToolExecutionBoundary 和轻量 PolicyDecision helper，让工具执行和策略判断开始有稳定挂载点。
+
+已完成：
+
+- 新增 `src/tools/tool-execution.ts`。
+- 新增 `src/policy/agent-policy.ts`。
+- agent-loop 中工具执行改为通过 `ToolExecutionBoundary.execute()` 委托 `ToolRegistry.run()`。
+- final submit / high-risk / raw auto-confirm 等可纯函数化判断进入 PolicyDecision helper。
+- high-risk / critical action 可表达 `requiresFreshContext`，stale freshness 只作为 cue / metadata，不自动刷新、不硬阻断。
+- 新增 `test:tool-execution` 和 `test:policy`。
+
+目标结构：
+
+```text
+src/tools/
+  tool-execution.ts
+src/policy/
+  agent-policy.ts
+```
+
+验收状态：
+
+- `npm run test:tool-execution` 通过。
+- `npm run test:policy` 通过。
+- `npm run test:agent-runtime` 通过。
+- `npm run test:agent-loop` 通过。
+- `runAgentLoop` 对外接口未变。
+- `ToolRegistry` 对外接口未变。
+- local adapter / MCP adapter 未重写。
+- Runtime / ContextManager / PromptAssembler / policy / tool execution 不读取 trace artifacts。
+
+---
+
+## Phase 4D: Workflow State / Runtime Controller Skeleton（已完成于 Plan7）
+
+目标：
+
+> 引入最小 WorkflowState，让 runtime 能表达当前流程位置；让 PolicyDecision 能结合 workflow phase 区分 apply_entry 和 final_submit；让 AgentRuntime 开始返回 workflow-aware runtime result，但仍委托 `runAgentLoop`。
+
+为什么现在做：
+
+```text
+button text = "Apply"
+```
+
+不能直接等于：
+
+```text
+final_submit
+```
+
+它可能是：
+
+```text
+apply_entry
+login_required
+captcha_required
+upload_resume
+save_draft
+final_submit
+```
+
+Phase 4D 要把这些流程语义从模糊按钮文本判断中分离出来。
+
+已完成：
+
+- 新增 `WorkflowState`，作为 runtime working set，不做完整 workflow engine。
+- 新增 `WorkflowTransition` helper，根据 URL、PageState、FormState、tool result、policy decision、gate kind、agent_done blocked 等有限信号推断 phase。
+- 将 `WorkflowState` 接入 ContextSnapshot / Prompt Sections，新增 `WORKFLOW_STATE` section。
+- 让 PolicyDecision helper 接收 workflow phase，优先用 workflow 语义区分 apply entry 和 final submit。
+- agent-loop 中维护 workflow state，并在 tool result / policy decision / gate / agent_done 后更新。
+- AgentRuntime result 带出 workflow state，但 `AgentRuntime.run()` 仍兼容委托 `runAgentLoop`。
+
+建议第一版阶段：
+
+```ts
+export type WorkflowPhase =
+  | 'observing'
+  | 'selecting_job'
+  | 'job_detail'
+  | 'entering_application'
+  | 'login_required'
+  | 'captcha_required'
+  | 'editing_resume'
+  | 'filling_application'
+  | 'reviewing'
+  | 'ready_for_final_submit'
+  | 'done'
+  | 'blocked'
+```
+
+目标结构：
+
+```text
+src/workflow/
+  workflow-state.ts
+  workflow-transition.ts
+```
+
+明确不做：
+
+- 完整 WorkflowEngine。
+- 多 Agent。
+- Skill / Memory。
+- 真实网站专用 adapter。
+- 自动登录。
+- 验证码处理。
+- 真实最终提交。
+- 重写 `runAgentLoop`。
+- 重写 `ToolRegistry`。
+- 修改 `packages/claude-code`。
+
+验收状态：
+
+- `runAgentLoop` 对外接口不变。
+- `ToolRegistry` 对外接口不变。
+- `AgentRuntime.run()` 仍兼容旧 mock LLM 流程。
+- WorkflowState 不读取 trace artifacts。
+- ContextManager / PromptAssembler 不读取 trace artifacts。
+- 登录页可被表达为 `login_required`。
+- captcha 页可被表达为 `captcha_required`。
+- final submit 仍受 `final_submit` gate 保护。
+- benchmark simple / complex 继续通过。
+- 新增 `npm run test:workflow`。
+- 新增 `npm run test:agent-runtime-workflow`。
+- 完整验证已通过：`build`、context、prompt-sections、metrics、tool-execution、policy、workflow、agent-runtime、agent-runtime-workflow、agent-loop、benchmark simple/complex、tool-catalog、observation。
+- 边界检查无命中：runtime / context / prompt / policy / workflow 不读取 trace artifacts。
+
+详细执行记录：
+
+- 见 `PLAN/plan7.md`。
+
+---
+
+## Phase 5: Policy Engine v1 / Policy Audit Skeleton（已完成第一版）
+
+目标：
+
+> 在 PolicyDecision helper 和 WorkflowState 稳定后，形成更完整但仍轻量的 policy boundary：统一 gate reason、保留兼容 facade、记录 policy audit/metrics，并生成第一版 safety report。
+
+阶段定位：
+
+```text
+PolicyDecision helper
+  -> PolicyEngine v1 skeleton
+  -> Policy audit events
+  -> Safety report v1
+```
+
+第一性边界：
+
+- Policy 决定工具动作是否 allow / gate / block / auto_confirm。
+- WorkflowState 只提供当前流程位置，不替代 policy。
+- Policy 不执行工具。
+- Policy 不读取 trace artifacts。
+- Safety report / benchmark / Web UI 可以读取 trace/metrics 作为旁路分析。
+- 不引入完整 DSL。
+- 不重写 `runAgentLoop` 主循环。
+- 不改变 `ToolRegistry` 对外接口。
+- 不改变 local adapter / MCP adapter。
+
+要做：
+
+- 新增轻量 `PolicyEngine` / `PolicyAudit` 类型，但保留 `decideToolPolicy()` 作为兼容 facade。
+- 统一 policy input：tool name、args、risk、safetyMode、currentUrl、refLabel、freshness、workflowState、page/form hints。
+- 统一 policy output：action、riskLevel、gateKind、reason、requiresFreshContext、workflowPhase、ruleId / policyCode。
+- 将 login / captcha / upload_resume / save_resume / final_submit / high_risk_action 的 reason 规范化。
+- 将 policy decision 记录到 agent trace event 或 tool span metadata。
+- metrics aggregation 增加 policy gate count、gate kind count、blocked reason count。
+- 新增 safety report v1 脚本，从 metrics/trace 旁路输出生成安全摘要。
+- 扩展 policy tests，覆盖 workflow-aware apply entry、final submit、login/captcha handoff、raw auto-confirm、stale freshness cue、upload/save 等 gate kind。
+- agent-loop 只做最小接入：调用 policy boundary，记录 audit metadata，保持主循环形状。
+
+建议文件范围：
+
+```text
+packages/web-buddy/src/policy/
+  agent-policy.ts
+  policy-engine.ts
+  policy-audit.ts
+
+packages/web-buddy/src/metrics/
+  aggregate.ts
+  schema.ts
+
+packages/web-buddy/scripts/
+  policy-engine-test.mjs
+  safety-report-test.mjs
+```
+
+验收目标：
+
+- `decideToolPolicy()` 旧调用仍可用。
+- `PolicyEngine.evaluate()` 或等价接口可被 agent-loop 调用。
+- final submit gate 语义不回退。
+- job_detail / entering_application 下 Apply 入口仍不是 `final_submit`。
+- reviewing / ready_for_final_submit 下 Submit / Confirm 仍是 `final_submit`。
+- login_required / captcha_required 不自动越过，能产生 human handoff / blocked cue。
+- policy audit 写入 trace/metrics，但 runtime/policy 不读取 trace artifacts。
+- benchmark simple / complex 继续通过。
+- `packages/claude-code` 不改。
+
+验收状态：
+
+- 已新增 `PolicyEngine` / `PolicyAuditEvent` / `SafetyReport` 第一版，并保留 `decideToolPolicy()` 兼容入口。
+- agent-loop 已在工具执行前生成 policy decision，并写出 `policy_decision` trace event；tool span metadata 已包含 policy metadata。
+- metrics 已聚合 policy decision / action / gate kind / policy code / blocked reason。
+- `test:mvp` 已成为当前 MVP 回归入口，并通过 context、prompt、metrics、tool execution、policy、workflow、agent runtime、agent loop、benchmark simple/complex、tool catalog、observation、safety report 验证。
+- 边界检查显示 runtime / context / workflow / tools / policy engine 不读取 trace artifacts；`safety-report.ts` 作为旁路 report 读取 trace/metrics。
+
+串行依赖：
+
+- 依赖 Phase 4C 的 PolicyDecision helper。
+- 依赖 Phase 4D 的 WorkflowState，否则 policy 仍会过度依赖按钮文本。
+
+推荐验证：
+
+```bash
+cd packages/web-buddy
+npm run build
+npm run test:policy
+npm run test:workflow
+npm run test:agent-runtime-workflow
+npm run test:agent-loop
+npm run test:metrics
+npm run benchmark:simple
+npm run benchmark:complex
+```
+
+---
+
+## Phase 5B: MVP Packaging（已完成第一版）
+
+目标：
+
+> 把已经完成的 state-aware context、policy boundary、trace/metrics/safety report 包装成新用户能理解、能运行、能验证的开源 MVP。
+
+阶段定位：
+
+```text
+Phase 5 internal capability
+  -> MVP-facing demo / docs / safety model / verification
+```
+
+已完成第一版：
+
+- 新增 `demo-research`，使用本地 fixture，避免依赖真实招聘站。
+- README / Quickstart 已重写为通用本地 Web Agent runtime 定位，求职投递作为 flagship workflow / example。
+- 新增 Safety Model 文档，解释 risk level、PolicyEngine、HumanGate、final submit、login/captcha handoff、audit/metrics/safety report 的边界。
+- `test:mvp` 已纳入 `benchmark:research`，成为当前 MVP 验证入口。
+- 文档已明确 `demo-form`、`demo-research`、`job-application` 三类展示入口。
+
+验收目标：
+
+- 新用户能在 10 分钟内跑通无模型 key 的本地 demo，并看到 trace / metrics / safety report。
+- 文档第一屏不再只强调阿里/求职。
+- `demo-research` 不触发高风险动作，能展示 observation tools、context、trace、metrics。
+- Safety Model 能清楚说明为什么不会自动登录、处理验证码或最终提交。
+- `npm run test:mvp` 继续通过。
+
+详细计划：
+
+- 见 `PLAN/plan9.md`。
+
+---
+
+## Phase 6: Workflow Engine v1（后续）
+
+目标：
+
+> 在 WorkflowState / transition helper 可测后，再从 mode 分支演进为本地可恢复 workflow。
 
 要做：
 
 - 新增 `WorkflowDefinition`。
 - 新增 `WorkflowEngine`。
-- 新增 `TaskStateStore` 本地文件版。
+- 新增 `TaskStateStore` 或 WorkflowStateStore 本地文件版。
 - 将 `demo-form`、`raw`、`fill` 迁移为 workflow preset。
 - 将 `alibaba-apply` 保留但逐步拆 step。
 
@@ -899,16 +1141,12 @@ src/workflows/
 
 - 新增 workflow 不需要修改 AgentRuntime。
 - `orchestrator.ts` 逐步变薄。
-- workflow state 能写入 `agent-state.json`。
+- workflow state 能写入 `agent-state.json` 或 workflow store。
 - step budget 用尽时能输出可续跑摘要。
 
 串行依赖：
 
-- 依赖 AgentRuntime Skeleton。
-
-并行任务：
-
-- Generic form-fill workflow 和 web-research workflow 可并行。
+- 依赖 Phase 4D 的 WorkflowState / transition helper。
 
 ---
 
@@ -1080,10 +1318,14 @@ packages/web-buddy/src/
     local-adapter.ts
     browser/
   policy/
+    agent-policy.ts
     policy-engine.ts
     permission-manager.ts
     risk-classifier.ts
     audit.ts
+  workflow/
+    workflow-state.ts
+    workflow-transition.ts
   workflows/
     workflow-engine.ts
     workflow-definition.ts
@@ -1180,22 +1422,41 @@ packages/web-buddy/src/
 - PageState/FormState 生成。
 - ContextManager 使用状态摘要而非纯 snapshot 拼接。
 - Agent 能知道已填/未填字段。
+- TaskState / freshness / recentActions 进入 prompt。
+
+状态：
+
+- 已完成。
 
 ### Milestone 4: Self-Owned Runtime
 
 完成标志：
 
-- AgentRuntime skeleton 接管当前 loop。
-- Prompt、Context、ToolExecution、Policy、StopCondition 从 loop 中抽出。
+- AgentRuntime skeleton 包装当前 loop。
+- PromptAssembler、ContextManager、ToolExecutionBoundary、PolicyDecision helper、StopConditionManager 从 loop 中抽出第一版边界。
 - Claude runtime 变成 adapter，而非主路径。
+
+状态：
+
+- 已完成第一版。
+- 已补充 WorkflowState / Runtime Controller Skeleton。
+- 仍未完成完整 WorkflowEngine。
 
 ### Milestone 5: Workflow-Based Platform
 
 完成标志：
 
+- WorkflowState 能表达 apply_entry、login_required、captcha_required、ready_for_final_submit。
+- PolicyDecision 能结合 workflow phase 区分 Apply 入口和最终提交。
 - `demo-form`、`web-research`、`job-application` 都是 workflow。
 - 新增 workflow 不需要改 AgentRuntime。
 - job application 不再定义项目边界。
+
+状态：
+
+- WorkflowState / transition helper 已完成第一版。
+- PolicyEngine v1 / policy audit / policy metrics / safety report 已完成第一版。
+- MVP Packaging 第一版已完成；后续继续打磨 Web UI 入口和 examples 索引，完整 WorkflowEngine 仍放在后续 Phase 6。
 
 ### Milestone 6: Skill-Enhanced Platform
 
@@ -1246,18 +1507,48 @@ Batch 3: Observation model（已完成）
   - ObservationManager
   - benchmark-simple final state artifact assertions
 
-Batch 4: Context manager（当前 Plan3）
+Batch 4: Context manager（已完成）
   - prompt sections
   - budget manager
   - recent actions summary
   - resume summary sections
   - hard boundary: no trace artifact reads in runtime context
 
-Batch 5: AgentRuntime facade
+Batch 5: AgentRuntime facade / context metrics / policy boundary（已完成第一版）
   - AgentRuntime.run
   - runAgentLoop compatibility wrapper
   - StopConditionManager
-  - ToolExecutionService integration
+  - PromptAssembler
+  - context selection metrics
+  - freshness metadata
+  - minimal TaskState
+  - ToolExecutionBoundary
+  - PolicyDecision helper
+
+Batch 6: Workflow state / runtime controller skeleton（已完成）
+  - WorkflowState
+  - WorkflowTransition helper
+  - WORKFLOW_STATE prompt section
+  - workflow-aware PolicyDecision
+  - agent-loop workflow state update
+  - AgentRuntime result exposes workflow state
+
+Batch 7: Policy Engine v1 / policy audit（已完成第一版）
+  - PolicyEngine v1 skeleton
+  - keep decideToolPolicy compatibility facade
+  - policy audit event/schema
+  - policy metrics aggregation
+  - standardized gate reason for login/captcha/upload/save/final-submit/high-risk
+  - safety report v1
+  - policy regression fixtures
+
+Batch 8: MVP Packaging（已完成第一版）
+  - demo-research
+  - README / Quickstart generic Web Agent rewrite
+  - Safety Model document
+  - examples/demo positioning
+  - test:mvp as official verification entry
+  - iteration log / plan status sync
 ```
 
 第一批不建议直接做：

@@ -38,6 +38,399 @@
 - 下一轮建议优先处理什么。
 ```
 
+## 2026-06-28 Phase 2B AgentKernel Skeleton + QueryLoop
+
+### 改动
+
+- 新增 `AgentKernel`、`QueryLoop`、`TurnStateSnapshot`、`RunController` 和 `TokenBudget` 占位接口。
+- `AgentRuntime.run()` 改为委托 `AgentKernel.start()`，但外部仍返回 `agent-runtime-result/v1` / `local-agent-loop`。
+- `runAgentLoop` 增加 `abortSignal`，在 loop 启动后、LLM 调用前、工具执行前检查 abort，并把 session final status 写成 `aborted`。
+- 新增 `npm run test:kernel`，并接入 `test:mvp`。
+
+### 验证
+
+- `npm run build` 通过。
+- `npm run test:kernel` 通过。
+- `npm run test:agent-runtime` 通过。
+- `npm run test:session` 通过。
+- `npm run test:agent-loop` 通过。
+
+### 结论
+
+- Phase 2B 已完成第一版 Kernel 边界，主循环行为保持兼容。
+- Kernel 第一版只发实时 lifecycle event，不直接写 session，避免 transcript/event 重复。
+- abort 语义当前保证工具执行前停止，不承诺中断正在执行的 Playwright action。
+
+### 遗留问题 / 下一步
+
+- Plan 3 可以在 `QueryLoop` 边界下继续拆 `ToolExecutionService`、tool lifecycle state、timeout/retry/abort 深化。
+
+## 2026-06-28 Phase 2A SessionStore + KernelEvent
+
+### 改动
+
+- 新增 `KernelEvent`、`FileSessionStore`、append-only `transcript.jsonl` / `events.jsonl`、`workflow.json` 和 `SessionRecorder`。
+- `runAgentLoop` 现在可选接收 session recorder，记录 user message、assistant message、tool call/result、policy decision、workflow snapshot、final result 和 error。
+- SDK/CLI run 会创建 `output/sessions/<sessionId>/`，CLI 结束时打印 session 和 transcript 路径。
+- 新增 `npm run test:session`，并接入 `test:mvp`。
+
+### 验证
+
+- `npm run build` 通过。
+- `npm run test:session` 通过。
+- `npm run test:mvp` 通过。
+
+### 边界
+
+- Session 是恢复事实源，trace 仍是审计/诊断输出。
+- runtime/session/context/workflow 不从 `output/traces` 读取恢复状态。
+
+## 2026-06-26 Phase 5B: MVP Packaging 第一版
+
+### 背景
+
+- Phase 5 已经完成 PolicyEngine / policy audit / metrics / safety report 骨架。
+- 当前项目能力已经接近通用本地 Web Agent runtime，但 README、demo 和用户入口仍偏 job-only。
+- Phase 5B 目标是让新用户不依赖真实招聘网站、账号或验证码，也能在 10 分钟内跑通安全 demo，并看到 trace / metrics / safety report。
+
+### 改动
+
+- 新增 `demo-research`：
+  - 在 `packages/web-buddy/src/sdk/orchestrator.ts` 中加入 read-only local fixture 分支。
+  - 使用本地 data URL 页面展示产品/文档/FAQ/表格信息。
+  - 只做 `browser_snapshot`、结构化页面摘要和截图，不触发登录、验证码、上传或提交。
+  - 写出 `research-summary.json` artifact、trace、metrics。
+- 新增脚本：
+  - `npm run demo:research`
+  - `npm run benchmark:research`
+  - `npm run report:safety`
+  - `packages/web-buddy/scripts/benchmark-research.mjs`
+  - `packages/web-buddy/scripts/safety-report.mjs`
+- 更新 `test:mvp`，纳入 `benchmark:research`。
+- 重写开源入口文档：
+  - `README.md` 改为通用 local auditable Web Agent runtime 定位。
+  - `packages/web-buddy/README.md` 改为 package 级 runtime / demo / safety / observability 入口。
+  - `docs/full-experience-guide.md` 增补 `demo:research`、`report:safety`、metrics / safety report 查看路径。
+- 新增 `docs/safety-model.md`：
+  - 说明 L0-L4、PolicyEngine 决策、HumanGate 职责、Workflow phase、final submit、login/captcha handoff、raw mode auto-confirm 适用边界、trace artifact 旁路边界。
+
+### 验证
+
+已通过：
+
+```bash
+cd packages/web-buddy
+npm run build
+npm run demo:research
+npm run benchmark:research
+npm run report:safety
+npm run test:mvp
+```
+
+`demo:research` 输出示例：
+
+```text
+final state : completed
+message     : Read-only research demo completed: 4 headings, 3 plan rows, 3 FAQ items.
+trace       : ../../output/2026-06-26T08-53-43/trace.jsonl
+max risk    : L0
+```
+
+`report:safety` 对 latest research benchmark 输出：
+
+```text
+status  : completed
+summary : Run ended with status completed; 0 high-risk policy decision(s) were recorded.
+```
+
+边界检查通过：
+
+```bash
+rg -n "page-state-latest|form-state-latest|output/traces|readFileSync|readFile" \
+  packages/web-buddy/src/agent \
+  packages/web-buddy/src/context \
+  packages/web-buddy/src/runtime/local \
+  packages/web-buddy/src/tools \
+  packages/web-buddy/src/policy \
+  packages/web-buddy/src/workflow \
+  --glob '*.ts'
+```
+
+结果只有 `packages/web-buddy/src/policy/safety-report.ts` 命中 `readFileSync`，符合旁路 safety report 读取 trace artifacts 的边界。
+
+额外检查：
+
+```bash
+git diff --check
+```
+
+通过。
+
+### 结论
+
+- Phase 5B 已完成第一版 MVP Packaging。
+- README 第一屏已从 job-only 调整为 local auditable Web Agent runtime。
+- 新用户可以先跑 `demo:form` / `demo:research`，再查看 metrics / safety report，不需要真实招聘网站。
+- 求职投递被保留为 flagship workflow，而不是唯一能力。
+- `packages/claude-code` 未改。
+
+### 遗留问题 / 下一步
+
+- `demo:research` 当前是确定性本地 fixture，不包含 LLM 总结；后续可在不影响稳定性的前提下增加可选模型总结。
+- Web UI 仍主要呈现已有 runtime 面板，后续可把 research demo 和 safety report 入口做进 UI。
+- Phase 6 WorkflowEngine / SkillSystem 仍暂缓，等 MVP 包装继续稳定后再启动。
+
+## 2026-06-26 Phase 5: Policy Engine v1 / Policy Audit Skeleton 收尾
+
+### 背景
+
+- Phase 4D 已经具备 WorkflowState / WorkflowTransition / workflow-aware policy，能区分 apply entry 和 final submit。
+- 下一步需要把原有 `PolicyDecision helper` 升级为更稳定的 policy boundary，让安全判断具备稳定 reason、ruleId、policyCode，并能进入 trace / metrics / safety report 复盘。
+
+### 改动
+
+- 新增 `packages/web-buddy/src/policy/policy-engine.ts`：
+  - 提供 `PolicyEngine.evaluate()`。
+  - 保留 `decideToolPolicy()` 兼容 facade。
+  - 输出 `schemaVersion`、`policyCode`、`ruleId`、`workflowPhase`、`auditTags`。
+- 新增 `packages/web-buddy/src/policy/policy-audit.ts`：
+  - 定义 `PolicyAuditEvent`。
+  - agent-loop 每次 policy decision 后写出 `policy_decision` trace event。
+- 扩展 `packages/web-buddy/src/runtime/local/agent-loop.ts`：
+  - 工具执行前调用 policy boundary。
+  - gate / blocker / recent action 使用规范化 policy reason。
+  - tool span metadata 写入 policy metadata。
+- 扩展 metrics：
+  - `RunMetrics.policy` 聚合 decisions、allows、gates、blocks、autoConfirms、gateKindCounts、policyCodeCounts、blockedReasonCounts。
+- 新增 `packages/web-buddy/src/policy/safety-report.ts`：
+  - 从 trace / metrics 旁路生成 safety report v1。
+  - 表达 finalSubmitAttempted、finalSubmitBlocked、loginHandoffRequired、captchaHandoffRequired、highRiskActionCount、gateCount。
+- 新增/更新测试脚本：
+  - `policy-engine-test.mjs`
+  - `safety-report-test.mjs`
+  - `policy-decision-test.mjs`
+  - `metrics-test.mjs`
+  - `test:mvp` npm script。
+
+### 验证
+
+已通过：
+
+```bash
+cd packages/web-buddy
+npm run test:mvp
+```
+
+`test:mvp` 覆盖：
+
+```text
+context / prompt-sections / metrics / tool-execution / policy / policy-engine
+workflow / agent-runtime / agent-runtime-workflow / agent-loop
+benchmark:simple / benchmark:complex / tool-catalog / observation / safety-report
+```
+
+边界检查通过：
+
+```bash
+rg -n "page-state-latest|form-state-latest|output/traces|readFileSync|readFile" \
+  packages/web-buddy/src/agent \
+  packages/web-buddy/src/context \
+  packages/web-buddy/src/runtime/local \
+  packages/web-buddy/src/tools \
+  packages/web-buddy/src/policy \
+  packages/web-buddy/src/workflow \
+  --glob '*.ts'
+```
+
+结果只有 `safety-report.ts` 命中 `readFileSync`，这是旁路 safety report 读取 trace/metrics 的允许路径；runtime / context / workflow / tools / PolicyEngine 未读取 trace artifacts。
+
+额外检查：
+
+```bash
+git diff --check
+```
+
+通过。
+
+已知非本轮问题：
+
+```bash
+npx tsc --noEmit
+```
+
+仍会失败，报错位于既有未触及路径：`src/cli/demo.ts`、`src/sdk/alibaba.ts`、`src/sdk/config.ts`、`src/web/server.ts`。当前仓库默认构建使用 `npm run build` / esbuild，Phase 5 验证以现有脚本为准。
+
+### 结论
+
+- Phase 5 已完成第一版。
+- 当前 MVP 已具备：
+  - State-aware context：PageState / FormState / TaskState / WorkflowState。
+  - Policy boundary：PolicyEngine / HumanGate / policy audit。
+  - Observability：Trace / metrics / benchmark / safety report。
+- `packages/claude-code` 未改。
+- Runtime / policy / context / workflow 没有把 trace artifacts 当运行时状态源。
+
+### 遗留问题 / 下一步
+
+- 下一步进入 Phase 5B: MVP Packaging。
+- 优先补：
+  - `demo-research`，证明项目不是 job-only。
+  - README / Quickstart 通用 Web Agent 定位重写。
+  - Safety Model 文档。
+  - examples / demo 命名和验证入口整理。
+- Phase 6 WorkflowEngine 暂缓，等 MVP 包装和展示路径稳定后再做更深结构改造。
+
+## 2026-06-26 Web Buddy local runtime 真实招聘站投递前流程复盘
+
+### 背景
+
+- 当前用户希望验证的是 `packages/web-buddy` 自研 local runtime，而不是恢复版 `packages/claude-code` adapter。
+- 当前 Web UI `http://localhost:5178/` 主按钮实际偏向 `/api/runtime/run`，会启动 Claude adapter 面板；为了确保测试链路正确，本次真实站验证直接调用 `web-buddy` local runtime：
+
+```text
+runJobApplicationAgent(mode='fill' / mode='alibaba-apply')
+-> runAgentLoop
+-> ToolRegistry
+-> local Playwright browser tools
+```
+
+- 测试目标不是完成最终投递，而是观察真实招聘网站中的投递前流程：
+
+```text
+职位列表
+-> 职位详情
+-> 点击“投递简历”进入申请流程
+-> 登录 / 验证码 / 更新站内简历 / 填写表单
+-> 最终提交前停止
+```
+
+### 改动
+
+- 本次没有改代码。
+- 使用一次性安全 gate 做真实站运行验证：
+  - 只放行职位详情页上的“投递简历”入口点击。
+  - 不放行上传简历、保存简历、最终投递、提交、确认提交等动作。
+  - 遇到登录、验证码、短信验证等人类步骤时停止。
+- 明确区分了当前测试中的两个入口：
+  - `web-buddy` local runtime：CLI / direct node 调用 `runJobApplicationAgent -> runAgentLoop`。
+  - 现有 Web UI 主 runtime 面板：偏 Claude adapter，对 local runtime 测试不够直观。
+
+### 验证
+
+- 构建通过：
+
+```bash
+cd packages/web-buddy
+npm run build
+```
+
+- 智谱 GLM 配置可用，模型链路曾在本地 demo 表单中成功驱动 browser tools 填写草稿：
+
+```text
+final state : filled
+trace       : ../../output/2026-06-25T14-50-05/trace.jsonl
+max risk    : L2
+```
+
+- 阿里招聘列表页真实站非登录态探测可运行，local runtime 能打开页面、读取页面并安全停在登录/申请前边界：
+
+```text
+trace       : ../../output/2026-06-25T14-51-08/trace.jsonl
+final state : stopped_at_submit
+max risk    : L3
+```
+
+- 阿里专用 `alibaba-apply` orchestrator 模式可以抓职位列表并做匹配，但本轮因匹配分不足停在 `no_match`：
+
+```text
+trace       : ../../output/manual-local-runtime-2026-06-26T02-48-27-751Z/trace.jsonl
+finalState  : no_match
+steps       : 6
+```
+
+- 通用 `fill` 模式从列表页出发时，local runtime 可以点击职位卡片进入职位详情页；后续一轮因模型请求超时中止：
+
+```text
+trace       : ../../output/manual-local-fill-presubmit-2026-06-26T02-49-28-721Z/trace.jsonl
+finalState  : blocked
+message     : LLM error: Request failed: This operation was aborted
+final URL   : https://talent-holding.alibaba.com/off-campus/position-detail?lang=zh&positionId=100014040009&track_id=...
+```
+
+- 直接从职位详情页启动 `fill` 模式后，local runtime 成功点击“投递简历”入口，随后跳转到阿里统一登录页并停止：
+
+```text
+trace       : ../../output/manual-local-detail-presubmit-2026-06-26T02-51-16-525Z/trace.jsonl
+finalState  : blocked
+maxRisk     : L3
+result      : redirected to https://mozi-login.alibaba-inc.com/ssoLogin.htm
+```
+
+- 本次验证没有上传简历、没有保存简历、没有填写登录信息、没有点击最终提交。
+
+### 结论
+
+- `web-buddy` 自研 local runtime 已经可以在真实招聘网站上完成基础浏览、职位列表读取、职位卡片点击、职位详情页识别和“投递简历”入口点击。
+- 当前主要问题不是浏览器工具完全不可用，而是 runtime 的招聘流程语义仍然太粗：
+  - “投递简历”在真实流程中通常只是 `apply_entry`，不是最终提交。
+  - 登录 / 验证码应该是 `human_handoff` / `pause`，不是整个任务的终止。
+  - 保存站内简历、上传简历、最终确认投递需要分成不同风险语义。
+- 现在模型经常把“页面上有登录”直接理解成无法继续，或把“投递/Apply”类按钮过早归入最终提交风险。
+- 当前可视化测试较慢，原因包括：
+  - headful + highlight + slowMo + typeDelay。
+  - 每轮 ReAct 都要 LLM 调用、工具调用、snapshot 刷新和上下文重建。
+  - 真实站页面文本大，prompt 和上下文容易膨胀。
+  - 智谱 Anthropic-compatible 请求在长上下文/多轮后可能出现 timeout / abort。
+- 当前浏览器容易关闭，原因是 CLI / Web server 的 session 生命周期偏一次性运行；blocked / login_required 后默认容易 `closeAll()`，不适合真实投递流程中的人工接管。
+
+### 遗留问题 / 下一步
+
+- 下一轮优先不要先做更复杂的填表，而是补 runtime workflow 语义：
+  - `apply_entry`
+  - `login_handoff`
+  - `captcha_handoff`
+  - `upload_resume`
+  - `save_resume_draft`
+  - `final_submit`
+- 增加轻量 `WorkflowState` / 扩展 `TaskState`，建议阶段：
+
+```text
+selecting_job
+job_detail
+entering_application
+login_required
+editing_resume
+filling_application
+reviewing
+ready_for_final_submit
+done
+blocked
+```
+
+- 把登录 / 验证码从 `blocked terminal state` 调整为 `pause/resume handoff`：
+
+```text
+browser remains open
+user logs in
+runtime refreshes PageState/FormState
+continue from current workflow phase
+```
+
+- 增加 runtime speed profiles：
+  - `watch`: headful + highlight + slowMo + screenshots，适合演示。
+  - `normal`: headful + minimal highlight，适合真实调试。
+  - `fast`: headless/headful 可选 + 精简 context + 最少截图，适合回归。
+- 重做 Web UI 时必须显式区分：
+  - `Local Runtime`
+  - `Claude Adapter`
+- Local Runtime Web UI 需要支持：
+  - 当前 workflow phase。
+  - 当前 gate 类型。
+  - 登录/验证码 handoff 后继续。
+  - 保持浏览器打开。
+  - 最终提交永久保护。
+  - trace / screenshot / metrics 查看。
+
 ## 2026-06-18 第一版测试通过：初步投递阿里巴巴招聘网站成功
 
 ### 背景

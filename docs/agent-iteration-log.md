@@ -38,6 +38,42 @@
 - 下一轮建议优先处理什么。
 ```
 
+## 2026-06-29 Phase 2D Plan 4 权限分层文档定位
+
+### 背景
+
+- Phase 2B 已经把运行入口包进 `AgentKernel -> QueryLoop -> runAgentLoop`。
+- Phase 2C 已经把单个工具调用生命周期拆到 `ToolExecutionService v1`。
+- Plan 4 / Phase 2D 需要解释它不是继续拆工具执行，也不是做完整 UI，而是把现有 policy gate 语义提升成 `PolicyEngine -> PermissionEngine -> ApprovalQueue -> HumanGate` 的通用许可边界。
+
+### 改动
+
+- 更新 Phase 2 总纲，补充 `PLAN/phase2/plan4.md` 入口，并明确三步关系：
+  - Plan 2 = 把运行入口包进 Kernel。
+  - Plan 3 = 把工具执行从 `runAgentLoop` 拆出去。
+  - Plan 4 = 把 Policy 和 Permission 分层。
+- 说明 `PolicyEngine` / `PermissionEngine` / `HumanGate` / `ApprovalQueue v1` 的职责差异：
+  - `PolicyEngine` 负责风险判断和策略建议。
+  - `PermissionEngine` 只输出 allow / ask / deny。
+  - `ApprovalQueue v1` 只维护本进程内 pending / resolved approval 状态。
+  - `HumanGate` 仍负责实际询问用户。
+- 收窄 Phase 2D v1 边界：不做完整 Task Cockpit UI，不做持久 permission store，不做跨进程 approval 恢复，不做 remembered permission rules。
+- 更新 package README 的 Phase 2 Kernel Notes，补充 Plan 4 的位置、非目标和后续实现应新增的测试命令。
+
+### 验证
+
+- `git diff --check` 通过。
+
+### 结论
+
+- Plan 4 的文档口径是权限分层和可审计确认队列，不是扩大自动执行权限。
+- final submit 仍保持人工接管语义；HumanGate 仍是实际询问用户的组件。
+
+### 遗留问题 / 下一步
+
+- Phase 2D 实现完成后，需要把 `npm run test:permission`、`npm run test:approval-queue` 或等价合并脚本落到 `package.json`。
+- 实现完成后可新增 `PLAN/phase2/plan4-completion-explanation.md`，沉淀实际完成内容和边界。
+
 ## 2026-06-29 Phase 2C ToolExecutionService v1 文档定位
 
 ### 背景

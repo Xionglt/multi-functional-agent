@@ -25,7 +25,7 @@ export interface WorkflowTransitionResult {
   changed: boolean
 }
 
-const LOGIN_TEXT = /login|log in|sign in|signin|sso|auth|登录|登陆|登入|账号登录|统一认证|单点登录/i
+const LOGIN_TEXT = /login|log in|sign in|signin|sso|auth|password|密码登录|短信登录|账号登录|统一认证|单点登录|请登录|登录后|登陆后|登入后/i
 const CAPTCHA_TEXT = /captcha|human verification|verify you are human|人机验证|验证码|安全验证|滑块验证/i
 const APPLY_ENTRY_TEXT = /apply|投递|投递简历|立即投递|申请职位|开始申请/i
 
@@ -166,13 +166,24 @@ function inferWorkflowRule(input: WorkflowTransitionInput): WorkflowRule | undef
     }
   }
 
-  if (input.page?.pageType === 'detail' && input.previous.phase === 'observing') {
+  if (
+    input.page?.pageType === 'detail' &&
+    (
+      input.previous.phase === 'observing' ||
+      input.previous.phase === 'entering_application' ||
+      input.previous.phase === 'login_required' ||
+      input.previous.phase === 'captcha_required'
+    )
+  ) {
     return {
       phase: 'job_detail',
       confidence: 'medium',
       reason: 'Current page appears to be a job detail page.',
     }
   }
+
+  const clearedHandoff = clearedHumanHandoffRule(input)
+  if (clearedHandoff) return clearedHandoff
 
   return undefined
 }
@@ -231,4 +242,42 @@ function isApplyEntryClick(input: WorkflowTransitionInput): boolean {
   const observation = input.toolResult?.observation ?? ''
   if (input.policyDecision?.gateKind === 'final_submit') return false
   return APPLY_ENTRY_TEXT.test(observation) || input.toolResult?.pageChanged === true
+}
+
+function clearedHumanHandoffRule(input: WorkflowTransitionInput): WorkflowRule | undefined {
+  if (input.previous.phase !== 'login_required' && input.previous.phase !== 'captcha_required') return undefined
+  if (!input.page) return undefined
+  const pageText = workflowText(input.currentUrl, input.page)
+  if (input.page.pageType === 'login' || input.page.pageType === 'captcha') return undefined
+  if (LOGIN_TEXT.test(pageText) || CAPTCHA_TEXT.test(pageText)) return undefined
+
+  if (input.page.pageType === 'detail') {
+    return {
+      phase: 'job_detail',
+      confidence: 'medium',
+      reason: 'Human handoff appears cleared and the current page is a job detail page.',
+    }
+  }
+
+  if (input.page.pageType === 'form' || (input.form && input.form.fields.length > 0)) {
+    return {
+      phase: 'filling_application',
+      confidence: 'medium',
+      reason: 'Human handoff appears cleared and the current page has application form fields.',
+    }
+  }
+
+  if (input.page.pageType === 'confirmation') {
+    return {
+      phase: 'done',
+      confidence: 'medium',
+      reason: 'Human handoff appears cleared and the current page looks like a confirmation page.',
+    }
+  }
+
+  return {
+    phase: 'observing',
+    confidence: 'medium',
+    reason: 'Human handoff appears cleared; resuming workflow observation.',
+  }
 }

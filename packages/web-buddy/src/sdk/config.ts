@@ -158,6 +158,14 @@ function humanGateModeEnv(env: Record<string, string | undefined>): HumanLoopCon
   return env.HUMAN_GATE_MODE === 'auto' ? 'auto' : 'cli'
 }
 
+function expandKnownRecruitmentAllowedDomains(domains: string[]): string[] {
+  const expanded = new Set(domains)
+  if (expanded.has('talent-holding.alibaba.com')) {
+    expanded.add('talent.alibaba.com')
+  }
+  return [...expanded]
+}
+
 /**
  * Build a fully-resolved AgentConfig.
  *
@@ -227,10 +235,10 @@ export function loadConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
   const visualHighlight = boolEnv(env, 'PLAYWRIGHT_VISUAL_HIGHLIGHT', !headless)
 
   const allowedDomainsRaw = overrides.browser?.allowedDomains ?? env.PLAYWRIGHT_ALLOWED_DOMAINS ?? ''
-  const allowedDomains = allowedDomainsRaw
+  const allowedDomains = expandKnownRecruitmentAllowedDomains(allowedDomainsRaw
     .split(',')
     .map((d) => d.trim().toLowerCase())
-    .filter(Boolean)
+    .filter(Boolean))
 
   return {
     model,

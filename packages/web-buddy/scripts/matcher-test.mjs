@@ -5,7 +5,7 @@
  *   npm run test:matcher   (after build)
  */
 import assert from 'node:assert'
-import { matchJobs } from '../dist/sdk/matcher.js'
+import { decideMatchThreshold, matchJobs } from '../dist/sdk/matcher.js'
 
 const profile = {
   source: 'json',
@@ -53,6 +53,14 @@ for (const s of best.matchedSkills) {
 // The zero-overlap job must score lowest and have no matched skills.
 const worst = matches[matches.length - 1]
 assert.strictEqual(worst.matchedSkills.length, 0, 'zero-overlap job should match nothing')
+
+const reranked = [
+  { ...matches[1], score: 0.44 },
+  { ...matches[0], score: 0.46 },
+]
+const decision = decideMatchThreshold(reranked, 0.45)
+assert.strictEqual(decision.shouldApply, true, 'threshold decision should use the highest-score candidate, not only the first item')
+assert.strictEqual(decision.best?.job.id, 'perfect')
 
 console.log('matcher-test: PASS')
 for (const m of matches) {

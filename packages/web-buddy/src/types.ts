@@ -1,3 +1,5 @@
+import type { PageFacts } from './observation/page-facts.js'
+
 export interface ElementRef {
   ref: string
   role?: string
@@ -26,6 +28,7 @@ export interface PageSnapshot {
   url: string
   title: string
   textSummary: string
+  facts?: PageFacts
   elements: ElementRef[]
   stats: {
     elementCount: number

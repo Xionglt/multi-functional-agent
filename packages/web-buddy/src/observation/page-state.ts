@@ -1,4 +1,5 @@
 import type { PageSnapshot } from '../types.js'
+import { normalizePageFacts, type PageFacts } from './page-facts.js'
 
 export type PageType = 'unknown' | 'login' | 'list' | 'detail' | 'form' | 'confirmation' | 'captcha'
 
@@ -13,11 +14,13 @@ export interface PageState {
   buttonCount: number
   inputCount: number
   textSummary: string
+  facts?: PageFacts
   updatedAt: string
 }
 
 export function buildPageState(snapshot: PageSnapshot, pageType: PageType, updatedAt = new Date().toISOString()): PageState {
   const elements = snapshot.elements ?? []
+  const facts = normalizePageFacts(snapshot.facts)
   return {
     schemaVersion: 'page-state/v1',
     url: snapshot.url,
@@ -33,6 +36,7 @@ export function buildPageState(snapshot: PageSnapshot, pageType: PageType, updat
       snapshot.stats.inputCount ??
       elements.filter((el) => ['input', 'textarea', 'select'].includes(el.tag) || /textbox|combobox|searchbox/.test(el.role || '')).length,
     textSummary: snapshot.textSummary,
+    ...(facts ? { facts } : {}),
     updatedAt,
   }
 }

@@ -166,6 +166,8 @@ async function runPermissionScenarios() {
       workflowEngine: finalSubmitWorkflow,
     })
     assert.equal(finalSubmit.result.blocked, true, 'final submit should remain blocked after approval')
+    assert.equal(finalSubmit.result.steps >= 2, true, 'final submit approval should return control to the model before the run stops')
+    assert.equal(finalSubmit.result.workflowState?.phase, 'ready_for_final_submit')
     assert.equal(finalSubmit.toolCalls.length, 0, 'final submit tool must not execute')
     assert.equal(finalSubmit.gate.requests[0].kind, 'final_submit')
     assert.equal(finalSubmit.queue.snapshot().approved.length, 1)
@@ -205,9 +207,12 @@ async function runPermissionScenarios() {
       'final submit should retain the human approval evidence even though runtime still blocks execution',
     )
     assert(
-      finalSubmitEvidence.some((evidence) => evidence.kind === 'workflow_state' && evidence.phase === 'blocked'),
-      'final submit should record blocked workflow_state evidence',
+      finalSubmitEvidence.some((evidence) => evidence.kind === 'workflow_state' && evidence.phase === 'ready_for_final_submit'),
+      'final submit should record ready_for_final_submit workflow_state evidence after returning control',
     )
+    const finalSubmitCompletionGate = completionGateEntries(finalSubmit.transcript).at(-1)
+    assert.equal(finalSubmitCompletionGate?.action, 'block')
+    assert.equal(finalSubmitCompletionGate?.workflowPhase, 'ready_for_final_submit')
 
     const agentDoneWorkflow = new RecordingWorkflowEngine()
     const agentDone = await runLoopScenario({
@@ -321,7 +326,7 @@ async function runPermissionScenarios() {
       seedFresh: false,
       withSession: true,
     })
-    assert.equal(policyDeny.result.blocked, true, 'policy block should become permission deny')
+    assert.equal(policyDeny.result.blocked, false, 'stale-context policy deny should let the loop continue after observation')
     assert.equal(policyDeny.toolCalls.length, 0, 'permission deny should not execute the tool')
     assert.equal(policyDeny.gate.requests.length, 0, 'permission deny should not call HumanGate')
     assert.equal(policyDeny.queue.snapshot().all.length, 0, 'permission deny should not enqueue approval')

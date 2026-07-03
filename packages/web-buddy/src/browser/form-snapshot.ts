@@ -1,6 +1,7 @@
 import { toolFailure, toolSuccess } from '../errors.js'
 import { observationManager } from '../observation/observation-manager.js'
 import { sessionManager } from '../session/manager.js'
+import { collectPageFacts } from './page-facts.js'
 
 const CONTROL_SELECTOR = [
   'input',
@@ -118,6 +119,7 @@ export async function browserFormSnapshot(input: {
             name: normalize(el.getAttribute('name')) || undefined,
             id: normalize(el.getAttribute('id')) || undefined,
             value: fieldValue(el),
+            checked: type === 'checkbox' || type === 'radio' ? input.checked : undefined,
             required: required(el),
             disabled: input.disabled || el.getAttribute('aria-disabled') === 'true',
             readonly: input.readOnly || el.getAttribute('aria-readonly') === 'true',
@@ -129,15 +131,62 @@ export async function browserFormSnapshot(input: {
           if (fields.length >= limit) break
         }
 
-        const uploadHints = Array.from(document.querySelectorAll('input[type="file"],button,[role="button"],a,[class*="upload"],[class*="Upload"]'))
-          .map((el) => ({
-            tag: el.tagName.toLowerCase(),
-            type: (el as HTMLInputElement).type || el.getAttribute('type') || undefined,
-            text: normalize(el.textContent || (el as HTMLInputElement).value || el.getAttribute('aria-label')).slice(0, 180),
-            visible: isVisible(el),
-            accept: el.getAttribute('accept') || undefined,
+        const forbiddenUploadActionText =
+          /确认投递|提交申请|投递简历|立即投递|提交投递|投递|提交|申请|\b(?:apply(?:\s+now)?|submit(?:\s+application)?|confirm(?:\s+(?:application|submit))?|send\s+application|start\s+application)\b/i
+        const explicitUploadTargetText =
+          /上传|重新上传|选择.{0,8}(?:文件|简历)|选取.{0,8}(?:文件|简历)|附件简历|上传附件|附件上传|resume[-_\s]*upload|upload[-_\s]*resume|file[-_\s]*upload|upload[-_\s]*file|choose[-_\s]*file|select[-_\s]*file|\bupload\b|browse/i
+        const uploadHints = Array.from(document.querySelectorAll('input[type="file"],button,[role="button"],a,[class*="upload"],[class*="Upload"],[id*="upload"],[id*="Upload"]'))
+          .map((el) => {
+            const input = el as HTMLInputElement
+            const className =
+              typeof (el as HTMLElement).className === 'string'
+                ? (el as HTMLElement).className
+                : el.getAttribute('class') || undefined
+            const text = normalize(
+              el.textContent ||
+                input.value ||
+                el.getAttribute('aria-label') ||
+                el.getAttribute('title') ||
+                el.getAttribute('name') ||
+                el.getAttribute('id'),
+            ).slice(0, 180)
+            const humanText = normalize([
+              el.textContent,
+              input.value,
+              el.getAttribute('aria-label'),
+              el.getAttribute('title'),
+              input.placeholder,
+            ].filter(Boolean).join(' '))
+            const searchableText = normalize([
+              humanText,
+              el.getAttribute('name'),
+              el.getAttribute('id'),
+              className,
+              el.getAttribute('accept'),
+            ].filter(Boolean).join(' '))
+            return {
+              tag: el.tagName.toLowerCase(),
+              type: input.type || el.getAttribute('type') || undefined,
+              text,
+              visible: isVisible(el),
+              accept: el.getAttribute('accept') || undefined,
+              humanText,
+              searchableText,
+            }
+          })
+          .filter((item) => {
+            if (item.type === 'file') return true
+            if (!item.visible) return false
+            if (forbiddenUploadActionText.test(item.humanText)) return false
+            return explicitUploadTargetText.test(item.searchableText)
+          })
+          .map((item) => ({
+            tag: item.tag,
+            type: item.type,
+            text: item.text,
+            visible: item.visible,
+            accept: item.accept,
           }))
-          .filter((item) => item.type === 'file' || /上传|简历|resume|upload|pdf/i.test(item.text))
           .slice(0, 40)
 
         const submitCandidates = Array.from(document.querySelectorAll('button,input[type="submit"],input[type="button"],a,[role="button"]'))
@@ -172,9 +221,14 @@ export async function browserFormSnapshot(input: {
       maxFields,
     )
 
+    const [title, facts] = await Promise.all([
+      session.page.title(),
+      collectPageFacts(session.page).catch(() => undefined),
+    ])
     const data = {
       url: session.page.url(),
-      title: await session.page.title(),
+      title,
+      ...(facts ? { facts } : {}),
       ...result,
     }
     try {

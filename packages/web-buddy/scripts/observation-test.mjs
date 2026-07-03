@@ -11,11 +11,24 @@ import { detectPageType } from '../dist/observation/page-type-detector.js'
 const root = mkdtempSync(join(tmpdir(), 'mfa-observation-'))
 
 try {
+  const pageFacts = {
+    hasAgreementCheckbox: true,
+    agreementChecked: false,
+    hasApplicationQuotaDialog: true,
+    quotaDialogText: '本月能申请 10 个职位，请慎重选择。',
+    hasRealUploadInput: true,
+    uploadCandidateCount: 2,
+    submitLikeButtons: [{ tag: 'button', type: 'submit', text: 'Submit application', risk: 'L3', visible: true }],
+    likelyApplyEntryButtons: [{ tag: 'button', type: 'button', text: 'Apply now', visible: true }],
+    likelyFinalSubmitButtons: [{ tag: 'button', type: 'submit', text: 'Submit application', visible: true }],
+    visibleBlockingDialog: { present: true, kind: 'quota', text: '本月能申请 10 个职位，请慎重选择。' },
+  }
   const snapshot = {
     snapshotId: 'snap_test',
     url: 'https://example.test/apply',
     title: 'Apply for Frontend Engineer',
     textSummary: 'Application form for Frontend Engineer. Submit application when complete.',
+    facts: pageFacts,
     elements: [
       element('e1', 'input', 'Name', 'L2'),
       element('e2', 'input', 'Email', 'L2'),
@@ -38,6 +51,9 @@ try {
   assert.equal(pageState.pageType, 'form')
   assert.equal(pageState.formCount, 1)
   assert.equal(pageState.inputCount, 2)
+  assert.equal(pageState.facts.hasAgreementCheckbox, true)
+  assert.equal(pageState.facts.hasApplicationQuotaDialog, true)
+  assert.equal(pageState.facts.visibleBlockingDialog.kind, 'quota')
   assert.equal(detectPageType(pageState), 'form')
   assert.equal(detectPageType({ title: 'Security check', textSummary: 'Please verify you are human before continuing.' }), 'captcha')
 
@@ -55,6 +71,7 @@ try {
     submitCandidates: [{ tag: 'button', type: 'submit', text: 'Submit application', risk: 'L3', visible: true }],
     uploadHints: [{ tag: 'input', type: 'file', text: '', visible: true, accept: '.pdf' }],
     visibleErrors: ['Email is required'],
+    facts: pageFacts,
   }, '2026-06-24T00:00:00.000Z')
   assert.equal(formState.schemaVersion, 'form-state/v1')
   assert.equal(formState.fields.length, 4)
@@ -67,6 +84,9 @@ try {
   assert.equal(formState.uploadHints.length, 1)
   assert.equal(formState.uploadHints[0].accept, '.pdf')
   assert.deepEqual(formState.visibleErrors, ['Email is required'])
+  assert.equal(formState.facts.hasRealUploadInput, true)
+  assert.equal(formState.facts.uploadCandidateCount, 2)
+  assert.equal(formState.facts.likelyFinalSubmitButtons[0].text, 'Submit application')
 
   const trace = createAgentTraceSession({ sessionId: 'obs_test', outDir: root, source: 'observation-test' })
   assert(trace, 'trace should be created for artifact test')
@@ -80,6 +100,7 @@ try {
       submitCandidates: formState.submitCandidates,
       uploadHints: formState.uploadHints,
       visibleErrors: formState.visibleErrors,
+      facts: pageFacts,
     },
   })
 
@@ -97,6 +118,8 @@ try {
   assert.equal(artifactFormState.fields[2].options.length, 2)
   assert.equal(artifactFormState.uploadHints[0].accept, '.pdf')
   assert.deepEqual(artifactFormState.visibleErrors, ['Email is required'])
+  assert.equal(artifactFormState.facts.hasAgreementCheckbox, true)
+  assert.equal(artifactFormState.facts.visibleBlockingDialog.kind, 'quota')
   trace.finalize({ status: 'success' })
 
   console.log('observation-test: PASS')

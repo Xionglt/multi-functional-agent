@@ -8,6 +8,7 @@ import { browserSelect } from '../browser/select.js'
 import { browserSelectByText } from '../browser/select-by-text.js'
 import { browserSnapshot } from '../browser/snapshot.js'
 import { browserType } from '../browser/type.js'
+import { browserUploadFile } from '../browser/upload-file.js'
 import { browserWait } from '../browser/wait.js'
 import { sessionManager } from '../session/manager.js'
 import type { ToolSchema } from '../sdk/llm.js'
@@ -187,6 +188,22 @@ const localHandlers: Record<string, LocalHandler> = {
       fullPage: args.fullPage as boolean | undefined,
     })
     return toResult(r, r.ok ? r.data : undefined, false)
+  },
+
+  async browser_upload_file(args, ctx) {
+    const r = await browserUploadFile({
+      filePath: String(args.filePath ?? ''),
+      ref: args.ref as string | undefined,
+      text: args.text as string | undefined,
+      selector: args.selector as string | undefined,
+      exact: args.exact as boolean | undefined,
+      nth: args.nth as number | undefined,
+      timeoutMs: args.timeoutMs as number | undefined,
+      confirmed: Boolean(args.confirmed),
+      highlight: ctx.highlight,
+      sessionId: ctx.sessionId,
+    })
+    return toResult(r, r.ok ? r.data : undefined, r.ok ? Boolean(r.pageChanged) : false)
   },
 
   async agent_done(args) {

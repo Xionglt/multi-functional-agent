@@ -684,6 +684,7 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
     }
 
     const useLlm = llm.hasKey
+    const llmExtraContext = [extraContext, currentResumeUploadContext(config.resumePath)].filter(Boolean).join('\n')
     if (useLlm) {
       const goal =
         mode === 'raw'
@@ -697,7 +698,7 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
         goal, resume: profile, llm,
         registry: new ToolRegistry(),
         ctx: { sessionId, highlight, trace },
-        gate, extraContext,
+        gate, extraContext: llmExtraContext,
         safetyMode: mode === 'raw' ? 'raw' : 'guarded',
         permissionMode: config.human.permissionMode,
         allowFinalSubmit: config.human.allowFinalSubmit,
@@ -925,9 +926,11 @@ async function runAlibabaMatchPipeline(args: AlibabaMatchPipelineArgs): Promise<
     }
   }
 
-  const localFinal = detailed.length > 0
-    ? mergeCoarseAndDetailMatches(coarseMatches, matchJobs(args.profile, detailed))
-    : coarseMatches.slice(0, detailLimit || Math.min(10, coarseMatches.length))
+  const localFinal = detailLimit > 0
+    ? detailed.length > 0
+      ? mergeCoarseAndDetailMatches(coarseMatches, matchJobs(args.profile, detailed))
+      : []
+    : coarseMatches.slice(0, Math.min(10, coarseMatches.length))
   const finalMatches = args.llm.hasKey && localFinal.length > 0
     ? await refineMatchesWithLlm(localFinal, args.profile, args.llm, Math.min(detailLimit || localFinal.length, localFinal.length))
     : localFinal
@@ -937,6 +940,8 @@ async function runAlibabaMatchPipeline(args: AlibabaMatchPipelineArgs): Promise<
     schemaVersion: 'job-candidates/final/v1',
     scanned: jobs.length,
     detailsOpened: detailed.length,
+    detailsVerified: detailed.length,
+    detailsFailed: toDetail.length - detailed.length,
     detailsAttempted: toDetail.length,
     llmReranked: args.llm.hasKey && localFinal.length > 0,
     threshold: decision.threshold,
@@ -1090,6 +1095,11 @@ function serializeMatches(matches: MatchScore[]) {
     location: match.job.location,
     updated: match.job.updated,
     detailUrl: match.job.detailUrl,
+    sourceRootListUrl: (match.job as ScrapedJob).sourceRootListUrl,
+    sourceListUrl: (match.job as ScrapedJob).sourceListUrl,
+    sourcePageIndex: (match.job as ScrapedJob).sourcePageIndex,
+    sourceCardIndex: (match.job as ScrapedJob).sourceCardIndex,
+    sourceTitle: (match.job as ScrapedJob).sourceTitle,
     score: Number(match.score.toFixed(4)),
     reason: match.reason,
     matchedSkills: match.matchedSkills,
@@ -1299,6 +1309,16 @@ function defaultGoalForMode(mode: AgentMode): string {
   if (mode === 'auto-apply') return 'Run the structured job board apply workflow.'
   if (mode === 'raw') return DEFAULT_ALIBABA_APPLY_PROMPT
   return 'Fill the application form on the current page using the resume.'
+}
+
+function currentResumeUploadContext(resumePath: string): string {
+  if (!resumePath || !existsSync(resumePath)) return ''
+  return [
+    `Current task resume file path: ${resumePath}`,
+    'Resume-first rule: if the site shows an existing uploaded resume, do not treat it as satisfying this task unless it is this exact file or the human explicitly asks to reuse the existing site resume.',
+    'When a resume upload/re-upload/附件简历/上传简历 entry is visible, use browser_form_snapshot first, then call browser_upload_file with filePath equal to the current task resume path. Uploading is gated by upload_resume permission.',
+    'After uploading, refresh the form/page state and continue filling any required application fields. Do not click a true final submit/确认投递/提交申请 button.',
+  ].join('\n')
 }
 
 function sessionSourceFromRunSource(source: RunSource): AgentSessionSource {

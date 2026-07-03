@@ -223,6 +223,17 @@ const llmResumeSchema = resumeProfileV2Schema.omit({ source: true }).extend({
   schemaVersion: z.literal('resume-profile/v2').optional(),
 })
 
+type LlmResumeArrayFieldKey = 'targetRoles' | 'skills' | 'projects' | 'experience' | 'education' | 'keywords'
+
+const LLM_ARRAY_FIELD_KEYS: LlmResumeArrayFieldKey[] = [
+  'targetRoles',
+  'skills',
+  'projects',
+  'experience',
+  'education',
+  'keywords',
+]
+
 const SKILL_DICTIONARY = [
   'typescript', 'javascript', 'python', 'java', 'go', 'golang', 'rust', 'c++', 'c#',
   'react', 'vue', 'angular', 'next.js', 'node', 'nodejs', 'deno',
@@ -451,6 +462,12 @@ function sourceTypeFromLegacy(source: ResumeProfile['source']): ResumeSourceType
   return source
 }
 
+function legacySourceFromSourceType(type: ResumeSourceType): ResumeProfile['source'] {
+  if (type === 'json') return 'json'
+  if (type === 'txt' || type === 'docx' || type === 'html') return 'txt'
+  return 'pdf'
+}
+
 function legacyProfileToResumeV2(
   profile: ResumeProfile,
   metadata: {
@@ -589,6 +606,91 @@ function repairDeterministicContacts(
   return { profile: normalizeProfileV2(next), repaired, warnings }
 }
 
+function missingStringField(field: FieldValue<string> | undefined): boolean {
+  return !field?.value?.trim()
+}
+
+function missingArrayField<T>(field: FieldValue<T[]>): boolean {
+  return field.value.length === 0
+}
+
+function cloneProfileForRepair(profile: ResumeProfileV2): ResumeProfileV2 {
+  return {
+    ...profile,
+    source: { ...profile.source, extractionWarnings: [...profile.source.extractionWarnings] },
+    targetRoles: { ...profile.targetRoles, value: [...profile.targetRoles.value] },
+    skills: { ...profile.skills, value: [...profile.skills.value] },
+    projects: { ...profile.projects, value: [...profile.projects.value] },
+    experience: { ...profile.experience, value: profile.experience.value.map((item) => ({ ...item })) },
+    education: { ...profile.education, value: profile.education.value.map((item) => ({ ...item })) },
+    keywords: { ...profile.keywords, value: [...profile.keywords.value] },
+  }
+}
+
+function repairMissingLlmFields(
+  profile: ResumeProfileV2,
+  text: string,
+): { profile: ResumeProfileV2; repaired: boolean; warnings: string[] } {
+  const legacy = parseResumeText(text, legacySourceFromSourceType(profile.source.type))
+  const fallback = legacyProfileToResumeV2(legacy, {
+    type: profile.source.type,
+    textLength: text.length,
+    parser: 'heuristic',
+  })
+  const warnings: string[] = []
+  const next = cloneProfileForRepair(profile)
+
+  const backfillScalar = (
+    key: 'name' | 'location' | 'summary' | 'seniority',
+    warning: string,
+  ) => {
+    if (missingStringField(next[key]) && fallback[key]?.value) {
+      next[key] = fallback[key]
+      warnings.push(warning)
+    }
+  }
+  backfillScalar('name', 'Name field backfilled by deterministic resume parser.')
+  backfillScalar('location', 'Location field backfilled by deterministic resume parser.')
+  backfillScalar('summary', 'Summary field backfilled by deterministic resume parser.')
+  backfillScalar('seniority', 'Seniority field backfilled by deterministic resume parser.')
+
+  const backfillArray = (
+    key: 'targetRoles' | 'projects' | 'experience' | 'education' | 'keywords',
+    warning: string,
+  ) => {
+    if (missingArrayField(next[key]) && fallback[key].value.length > 0) {
+      next[key] = fallback[key]
+      warnings.push(warning)
+    }
+  }
+  backfillArray('targetRoles', 'Target roles backfilled by deterministic resume parser.')
+  backfillArray('projects', 'Projects backfilled by deterministic resume parser.')
+  backfillArray('experience', 'Experience backfilled by deterministic resume parser.')
+  backfillArray('education', 'Education backfilled by deterministic resume parser.')
+  backfillArray('keywords', 'Keywords backfilled by deterministic resume parser.')
+
+  const mergedSkills = normalizeStringArray([...next.skills.value, ...fallback.skills.value])
+  if (mergedSkills.length > next.skills.value.length) {
+    next.skills = {
+      value: mergedSkills,
+      confidence: Math.max(next.skills.confidence, fallback.skills.confidence),
+      evidence: next.skills.evidence || fallback.skills.evidence,
+    }
+    warnings.push('Skills merged with deterministic resume parser.')
+  }
+
+  if (warnings.length) {
+    next.source.parser = 'llm_with_heuristic_repair'
+    next.source.extractionWarnings.push(...warnings)
+  }
+  return { profile: normalizeProfileV2(next), repaired: warnings.length > 0, warnings }
+}
+
+function repairDeterministicResumeFields(profile: ResumeProfileV2, text: string): ResumeProfileV2 {
+  const contact = repairDeterministicContacts(profile, text).profile
+  return repairMissingLlmFields(contact, text).profile
+}
+
 interface LlmResumePayload {
   schemaVersion?: 'resume-profile/v2'
   name?: FieldValue<string>
@@ -603,6 +705,232 @@ interface LlmResumePayload {
   education: FieldValue<ResumeEducation[]>
   keywords: FieldValue<string[]>
   seniority?: FieldValue<string>
+}
+
+interface LlmResumeParseAttempt {
+  payload: LlmResumePayload
+  repaired: boolean
+  warnings: string[]
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function compactJson(value: unknown, maxChars = 9000): string {
+  const text = JSON.stringify(value, null, 2) ?? String(value)
+  return text.length > maxChars ? `${text.slice(0, maxChars)}\n... [truncated]` : text
+}
+
+function formatZodIssues(error: z.ZodError, limit = 6): string {
+  return error.issues
+    .slice(0, limit)
+    .map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
+    .join('; ')
+}
+
+function unwrapLlmResumeRoot(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  for (const key of ['profile', 'resume', 'resumeProfile', 'data', 'result']) {
+    if (isRecord(value[key])) return value[key]
+  }
+  return value
+}
+
+function coerceString(value: unknown): string | undefined {
+  if (value === null || value === undefined) return undefined
+  if (typeof value === 'string') return value.trim() || undefined
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return undefined
+}
+
+function coerceStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return normalizeStringArray(value.map(coerceString).filter(Boolean) as string[])
+  const scalar = coerceString(value)
+  if (!scalar) return []
+  return normalizeStringArray(scalar.split(/[,\n;；，、|/]+/))
+}
+
+function coerceConfidence(value: unknown, fallback: number): number {
+  const numeric = typeof value === 'number'
+    ? value
+    : typeof value === 'string'
+      ? Number.parseFloat(value)
+      : Number.NaN
+  if (!Number.isFinite(numeric)) return fallback
+  return clampConfidence(numeric > 1 && numeric <= 100 ? numeric / 100 : numeric)
+}
+
+function coerceEvidence(value: unknown, fallback: string): string | undefined {
+  if (Array.isArray(value)) {
+    const joined = value.map(coerceString).filter(Boolean).join('; ')
+    return sanitizedEvidence(joined || fallback)
+  }
+  return sanitizedEvidence(coerceString(value) || fallback)
+}
+
+function rawFieldValue(value: unknown): unknown {
+  if (isRecord(value) && 'value' in value) return value.value
+  return value
+}
+
+function normalizeScalarLlmField(
+  value: unknown,
+  fallbackEvidence: string,
+  fallbackConfidence = 0.65,
+): FieldValue<string> | undefined {
+  const rawValue = rawFieldValue(value)
+  const scalar = coerceString(rawValue)
+  if (!scalar) return undefined
+  const field = isRecord(value) ? value : {}
+  return {
+    value: scalar,
+    confidence: coerceConfidence(field.confidence, fallbackConfidence),
+    evidence: coerceEvidence(field.evidence, fallbackEvidence),
+  }
+}
+
+function normalizeArrayLlmField<T>(
+  value: unknown,
+  normalizeValue: (value: unknown) => T[],
+  fallbackEvidence: string,
+  fallbackConfidence = 0.65,
+): FieldValue<T[]> {
+  const rawValue = rawFieldValue(value)
+  const field = isRecord(value) ? value : {}
+  return {
+    value: normalizeValue(rawValue),
+    confidence: coerceConfidence(field.confidence, fallbackConfidence),
+    evidence: coerceEvidence(field.evidence, fallbackEvidence),
+  }
+}
+
+function coerceProjectArray(value: unknown): ResumeProjectExperience[] {
+  const items = Array.isArray(value) ? value : isRecord(value) || coerceString(value) ? [value] : []
+  return normalizeProjects(items.map((item) => {
+    if (!isRecord(item)) return { summary: coerceString(item) }
+    return {
+      name: coerceString(item.name ?? item.project ?? item.title),
+      role: coerceString(item.role),
+      period: coerceString(item.period ?? item.time ?? item.date),
+      summary: coerceString(item.summary ?? item.description ?? item.desc),
+      technologies: coerceStringArray(item.technologies ?? item.techStack ?? item.tech ?? item.skills),
+    }
+  }))
+}
+
+function coerceExperienceArray(value: unknown): ResumeExperience[] {
+  const items = Array.isArray(value) ? value : isRecord(value) || coerceString(value) ? [value] : []
+  return normalizeExperience(items.map((item) => {
+    if (!isRecord(item)) return { summary: coerceString(item) }
+    return {
+      company: coerceString(item.company ?? item.organization ?? item.org),
+      title: coerceString(item.title ?? item.role ?? item.position),
+      period: coerceString(item.period ?? item.time ?? item.date),
+      summary: coerceString(item.summary ?? item.description ?? item.desc),
+    }
+  }))
+}
+
+function coerceEducationArray(value: unknown): ResumeEducation[] {
+  const items = Array.isArray(value) ? value : isRecord(value) || coerceString(value) ? [value] : []
+  return normalizeEducation(items.map((item) => {
+    if (!isRecord(item)) return { school: coerceString(item) }
+    return {
+      school: coerceString(item.school ?? item.university ?? item.institution),
+      degree: coerceString(item.degree),
+      major: coerceString(item.major ?? item.field),
+      period: coerceString(item.period ?? item.time ?? item.date),
+    }
+  }))
+}
+
+function pickField(root: Record<string, unknown>, keys: string[]): unknown {
+  for (const key of keys) {
+    if (root[key] !== undefined && root[key] !== null) return root[key]
+  }
+  return undefined
+}
+
+function normalizeLlmResumePayload(raw: unknown): LlmResumePayload | null {
+  const root = unwrapLlmResumeRoot(raw)
+  if (!isRecord(root)) return null
+
+  return {
+    schemaVersion: 'resume-profile/v2',
+    name: normalizeScalarLlmField(pickField(root, ['name', 'fullName', 'candidateName']), 'candidate name field'),
+    email: normalizeScalarLlmField(pickField(root, ['email', 'mail']), 'email/contact field'),
+    phone: normalizeScalarLlmField(pickField(root, ['phone', 'mobile', 'telephone']), 'phone/contact field'),
+    location: normalizeScalarLlmField(pickField(root, ['location', 'city', 'address']), 'location field'),
+    summary: normalizeScalarLlmField(pickField(root, ['summary', 'profileSummary', 'introduction']), 'summary field'),
+    targetRoles: normalizeArrayLlmField(
+      pickField(root, ['targetRoles', 'target_roles', 'desiredRoles', 'roles', 'jobTargets']),
+      coerceStringArray,
+      'target roles field',
+      0.55,
+    ),
+    skills: normalizeArrayLlmField(
+      pickField(root, ['skills', 'technicalSkills', 'skillSet', 'technologies']),
+      coerceStringArray,
+      'skills field',
+      0.7,
+    ),
+    projects: normalizeArrayLlmField(
+      pickField(root, ['projects', 'projectExperience', 'project_experience']),
+      coerceProjectArray,
+      'projects field',
+      0.65,
+    ),
+    experience: normalizeArrayLlmField(
+      pickField(root, ['experience', 'workExperience', 'work_experience', 'employment']),
+      coerceExperienceArray,
+      'experience field',
+      0.65,
+    ),
+    education: normalizeArrayLlmField(
+      pickField(root, ['education', 'educations']),
+      coerceEducationArray,
+      'education field',
+      0.65,
+    ),
+    keywords: normalizeArrayLlmField(
+      pickField(root, ['keywords', 'tags', 'keyWords']),
+      coerceStringArray,
+      'keywords field',
+      0.55,
+    ),
+    seniority: normalizeScalarLlmField(pickField(root, ['seniority', 'level']), 'seniority field', 0.55),
+  }
+}
+
+function hasUsefulLlmResumePayload(payload: LlmResumePayload): boolean {
+  const nonEmptyArrays = LLM_ARRAY_FIELD_KEYS.filter((key) => payload[key].value.length > 0).length
+  const scalars = [payload.name, payload.email, payload.phone, payload.location, payload.summary, payload.seniority]
+    .filter((field) => Boolean(field?.value)).length
+  return nonEmptyArrays > 0 || scalars >= 3
+}
+
+function parseLlmResumePayload(raw: unknown): LlmResumeParseAttempt | null {
+  const direct = llmResumeSchema.safeParse(raw)
+  if (direct.success && hasUsefulLlmResumePayload(direct.data)) {
+    return { payload: direct.data, repaired: false, warnings: [] }
+  }
+
+  const normalized = normalizeLlmResumePayload(raw)
+  if (!normalized) return null
+  const normalizedParse = llmResumeSchema.safeParse(normalized)
+  if (!normalizedParse.success || !hasUsefulLlmResumePayload(normalizedParse.data)) return null
+
+  const issues = direct.success ? '' : formatZodIssues(direct.error)
+  return {
+    payload: normalizedParse.data,
+    repaired: true,
+    warnings: [
+      issues
+        ? `LLM resume JSON normalized before schema validation (${issues}).`
+        : 'LLM resume JSON normalized before schema validation.',
+    ],
+  }
 }
 
 function resumeLlmSystemPrompt(): string {
@@ -652,6 +980,26 @@ function resumeLlmUserPrompt(text: string): string {
   ].join('\n')
 }
 
+function resumeJsonRepairSystemPrompt(): string {
+  return [
+    'You repair resume JSON so it matches the requested schema.',
+    'Return only a single JSON object. Do not add markdown, comments, or prose.',
+    'Preserve the facts already present in the input JSON. Do not invent resume details.',
+    'Every field must follow { "value": ..., "confidence": number, "evidence": string }.',
+  ].join(' ')
+}
+
+function resumeJsonRepairUserPrompt(payload: unknown, schemaIssues: string): string {
+  return [
+    'Repair this candidate resume JSON into schemaVersion "resume-profile/v2".',
+    'Required array fields: targetRoles, skills, projects, experience, education, keywords.',
+    'Optional scalar fields: name, email, phone, location, summary, seniority.',
+    `Schema validation issues: ${schemaIssues || 'unknown'}`,
+    'Candidate JSON:',
+    compactJson(payload),
+  ].join('\n')
+}
+
 async function parseResumeTextWithLlm(
   text: string,
   metadata: {
@@ -661,37 +1009,58 @@ async function parseResumeTextWithLlm(
     extractionWarnings: string[]
   },
 ): Promise<ResumeProfileV2 | null> {
-  let payload: LlmResumePayload | null = null
+  let payload: unknown = null
   try {
-    payload = await metadata.llm.generateJson<LlmResumePayload>(
+    payload = await metadata.llm.generateJson<unknown>(
       resumeLlmSystemPrompt(),
       resumeLlmUserPrompt(text),
-      { timeoutMs: 30000, maxTokens: 2400, redactTrace: true },
+      { timeoutMs: 30000, maxTokens: 5000, redactTrace: true },
     )
   } catch {
     return null
   }
-  const parsed = llmResumeSchema.safeParse(payload)
-  if (!parsed.success) return null
+  if (payload === null) return null
+
+  let attempt = parseLlmResumePayload(payload)
+  if (!attempt) {
+    const firstParse = llmResumeSchema.safeParse(payload)
+    const firstIssues = firstParse.success ? '' : formatZodIssues(firstParse.error)
+    const repaired = await metadata.llm.generateJson<unknown>(
+      resumeJsonRepairSystemPrompt(),
+      resumeJsonRepairUserPrompt(payload, firstIssues),
+      { timeoutMs: 25000, maxTokens: 5000, redactTrace: true },
+    )
+    attempt = parseLlmResumePayload(repaired)
+    if (attempt) {
+      attempt.repaired = true
+      attempt.warnings.unshift(
+        firstIssues
+          ? `LLM resume JSON repaired after schema validation failure (${firstIssues}).`
+          : 'LLM resume JSON repaired after schema validation failure.',
+      )
+    }
+  }
+  if (!attempt) return null
 
   const profile: ResumeProfileV2 = normalizeProfileV2({
     schemaVersion: 'resume-profile/v2',
-    ...parsed.data,
+    ...attempt.payload,
     source: {
       path: metadata.path,
       type: metadata.type,
       extractionWarnings: [
         ...metadata.extractionWarnings,
+        ...attempt.warnings,
         ...(text.length > RESUME_LLM_MAX_CHARS
           ? ['Resume text was truncated before LLM parsing to stay within parser limits.']
           : []),
       ],
       textLength: text.length,
-      parser: 'llm',
+      parser: attempt.repaired ? 'llm_with_heuristic_repair' : 'llm',
     },
   })
 
-  return repairDeterministicContacts(profile, text).profile
+  return repairDeterministicResumeFields(profile, text)
 }
 
 async function ingestResumeText(
@@ -712,7 +1081,7 @@ async function ingestResumeText(
       extractionWarnings: warnings,
     })
     if (parsed) return parsed
-    warnings.push('LLM resume JSON parse failed schema validation; used heuristic parser.')
+    warnings.push('LLM resume JSON parse failed (request, empty response, or schema validation); used heuristic parser.')
   } else {
     warnings.push('No model key configured; used heuristic resume parser.')
   }

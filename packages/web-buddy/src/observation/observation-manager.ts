@@ -15,13 +15,10 @@ export class ObservationManager {
     const state = { ...base, pageType }
     this.pageStates.set(input.sessionId, state)
     this.writeArtifact('page-state-latest.json', state)
-    const existingFormState = this.formStates.get(input.sessionId)
-    if (!existingFormState || existingFormState.url !== input.snapshot.url) {
-      this.refreshFormState({
-        sessionId: input.sessionId,
-        formSnapshot: formSnapshotFromPageSnapshot(input.snapshot),
-      })
-    }
+    this.refreshFormState({
+      sessionId: input.sessionId,
+      formSnapshot: formSnapshotFromPageSnapshot(input.snapshot),
+    })
     return state
   }
 
@@ -33,7 +30,7 @@ export class ObservationManager {
     const pageState = this.pageStates.get(input.sessionId)
     if (pageState) {
       const pageType = detectPageType({ ...pageState, formState: state })
-      const updatedPageState = { ...pageState, pageType, updatedAt: state.updatedAt }
+      const updatedPageState = { ...pageState, pageType, facts: state.facts ?? pageState.facts, updatedAt: state.updatedAt }
       this.pageStates.set(input.sessionId, updatedPageState)
       this.writeArtifact('page-state-latest.json', updatedPageState)
     }
@@ -68,6 +65,7 @@ function formSnapshotFromPageSnapshot(snapshot: PageSnapshot): RawFormSnapshot {
     ['input', 'textarea', 'select'].includes(tag) || /textbox|combobox|searchbox/.test(role || '')
   return {
     url: snapshot.url,
+    facts: snapshot.facts,
     fields: snapshot.elements
       .filter((element) => isField(element.tag, element.role))
       .map((element, index) => ({

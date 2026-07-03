@@ -10,6 +10,7 @@ import type { GateDecision, GateKind } from '../sdk/human.js'
 import type { RiskLevel } from '../sdk/trace.js'
 import type { EvidenceKind } from '../workflow/workflow-evidence.js'
 import type { WorkflowConfidence, WorkflowPhase } from '../workflow/workflow-state.js'
+import type { PageFacts } from '../observation/page-facts.js'
 import type { PageType } from '../observation/page-state.js'
 import type { RecentActionStatus } from './types.js'
 
@@ -98,6 +99,7 @@ export interface CompactPageSummary {
   linkCount?: number
   buttonCount?: number
   inputCount?: number
+  facts?: PageFacts
   updatedAt?: string
 }
 
@@ -112,6 +114,7 @@ export interface CompactFormSummary {
   submitCandidates: CompactSubmitCandidateSummary[]
   uploadHints: CompactUploadHintSummary[]
   visibleErrors: string[]
+  facts?: PageFacts
   updatedAt?: string
 }
 

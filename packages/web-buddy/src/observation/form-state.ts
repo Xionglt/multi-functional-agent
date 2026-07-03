@@ -1,3 +1,5 @@
+import type { PageFacts } from './page-facts.js'
+
 export interface FormFieldState {
   index: number
   label: string
@@ -49,5 +51,6 @@ export interface FormState {
   submitCandidates: SubmitCandidate[]
   uploadHints?: UploadHint[]
   visibleErrors?: string[]
+  facts?: PageFacts
   updatedAt: string
 }

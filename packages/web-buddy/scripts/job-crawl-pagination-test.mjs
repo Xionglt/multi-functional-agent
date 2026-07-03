@@ -8,7 +8,7 @@ import { createServer } from 'node:http'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { scrapeJobList } from '../dist/sdk/alibaba.js'
+import { scrapeJobDetail, scrapeJobList } from '../dist/sdk/alibaba.js'
 import { runJobApplicationAgent } from '../dist/sdk/orchestrator.js'
 import { loadConfig } from '../dist/sdk/config.js'
 import { AutoHumanGate } from '../dist/sdk/human.js'
@@ -35,6 +35,7 @@ writeFileSync(resumePath, JSON.stringify({
 }, null, 2))
 
 const detailHits = new Map()
+const spaDetailHits = new Map()
 
 function html(body) {
   return `<!doctype html><html><head><meta charset="utf-8"><title>Mock Alibaba Jobs</title></head><body>${body}</body></html>`
@@ -130,6 +131,64 @@ const pages = {
   ],
 }
 
+const spaPages = {
+  1: [
+    {
+      id: 'spa-finance',
+      title: 'Finance Planning Analyst',
+      category: 'Finance',
+      location: 'Shanghai',
+      updated: '更新于 2026-07-01',
+      tags: 'excel,forecasting',
+      description: 'Budget planning and forecast reporting.',
+    },
+    {
+      id: 'spa-backend',
+      title: 'Backend Service Engineer',
+      category: 'Engineering-Backend',
+      location: 'Beijing',
+      updated: '更新于 2026-07-01',
+      tags: 'go,linux,kubernetes',
+      description: 'Build service infrastructure.',
+    },
+  ],
+  2: [
+    {
+      id: 'spa-good',
+      title: 'Frontend Automation Engineer',
+      category: 'Engineering-Frontend',
+      location: 'Hangzhou',
+      updated: '更新于 2026-07-01',
+      tags: 'typescript,react,node,playwright,frontend',
+      description: 'Build TypeScript React Playwright automation for browser agents.',
+    },
+    {
+      id: 'spa-ops',
+      title: 'Operations Specialist',
+      category: 'Operations',
+      location: 'Hangzhou',
+      updated: '更新于 2026-06-30',
+      tags: 'process,coordination',
+      description: 'Coordinate internal operations.',
+    },
+  ],
+  3: [
+    {
+      id: 'spa-search',
+      title: 'Search Metrics Analyst',
+      category: 'Data',
+      location: 'Hangzhou',
+      updated: '更新于 2026-06-29',
+      tags: 'sql,metrics',
+      description: 'Track search quality metrics.',
+    },
+  ],
+}
+
+function findSpaJob(id) {
+  return Object.values(spaPages).flat().find((job) => job.id === id)
+}
+
 const server = createServer((req, res) => {
   const url = new URL(req.url || '/', 'http://localhost')
   if (req.method === 'GET' && url.pathname === '/jobs') {
@@ -140,6 +199,74 @@ const server = createServer((req, res) => {
       <h1>在招职位 共7个岗位</h1>
       ${(pages[page] || []).map(card).join('\n')}
       ${next}
+    `))
+    return
+  }
+
+  if (req.method === 'GET' && url.pathname === '/jobs-bad-detail') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    res.end(html(`
+      <h1>在招职位 共1个岗位</h1>
+      <nav>筛选 清除 职位类别 技术类 产品类</nav>
+      <article data-job-card data-title="Broken Detail Engineer" data-category="Engineering"
+        data-location="Hangzhou" data-updated="更新于 2026-07-01" data-tags="agent,typescript"
+        onclick="window.__clickedBrokenDetail = true" style="cursor:pointer">
+        <h2 data-job-title>Broken Detail Engineer</h2>
+        <p>Looks clickable but intentionally stays on the list page.</p>
+      </article>
+    `))
+    return
+  }
+
+  if (req.method === 'GET' && url.pathname === '/spa-jobs') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    res.end(html(`
+      <h1>SPA Mock Jobs</h1>
+      <div id="app"></div>
+      <script>
+        const pages = ${JSON.stringify(spaPages).replace(/</g, '\\u003c')};
+        let pageIndex = 1;
+        function escapeHtml(value) {
+          return String(value).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+        }
+        function openSpaDetail(id) {
+          window.location.href = '/spa-detail?positionId=' + encodeURIComponent(id);
+        }
+        function renderList() {
+          const jobs = pages[pageIndex] || [];
+          document.querySelector('#app').innerHTML = [
+            '<h2>在招职位 共5个岗位</h2>',
+            jobs.map((job) => [
+              '<article data-job-card data-title="' + escapeHtml(job.title) + '"',
+              ' data-category="' + escapeHtml(job.category) + '"',
+              ' data-location="' + escapeHtml(job.location) + '"',
+              ' data-updated="' + escapeHtml(job.updated) + '"',
+              ' data-tags="' + escapeHtml(job.tags) + '"',
+              ' onclick="openSpaDetail(\\'' + escapeHtml(job.id) + '\\')" style="cursor:pointer">',
+              '<h2 data-job-title>' + escapeHtml(job.title) + '</h2>',
+              '<p>' + escapeHtml(job.description) + '</p>',
+              '</article>'
+            ].join('')).join(''),
+            pageIndex < 3 ? '<button data-next-page type="button" onclick="pageIndex += 1; renderList()">下一页</button>' : ''
+          ].join('');
+        }
+        renderList();
+      </script>
+    `))
+    return
+  }
+
+  if (req.method === 'GET' && url.pathname === '/spa-detail') {
+    const id = url.searchParams.get('positionId')
+    const job = findSpaJob(id)
+    spaDetailHits.set(id, (spaDetailHits.get(id) || 0) + 1)
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    res.end(html(`
+      <main data-position-id="${id || ''}">
+        <h1 data-job-title>${job?.title || 'Unknown Job'}</h1>
+        <p>Requirements: ${job?.tags || ''}. ${job?.description || ''}</p>
+        <button>投递简历</button>
+      </main>
     `))
     return
   }
@@ -185,6 +312,7 @@ const server = createServer((req, res) => {
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
 const { port } = server.address()
 const jobsUrl = `http://127.0.0.1:${port}/jobs?page=1`
+const spaJobsUrl = `http://127.0.0.1:${port}/spa-jobs`
 
 try {
   const crawl = await scrapeJobList('pagination-direct', jobsUrl, undefined, { maxPages: 3, maxJobs: 20 })
@@ -193,6 +321,68 @@ try {
   assert.strictEqual(crawl.jobs.length, 5, 'positionId/title dedupe should keep five unique jobs')
   assert.strictEqual(crawl.jobs.filter((job) => job.title === 'Finance Operations Analyst').length, 1)
   assert(crawl.jobs.every((job) => job.detailUrl?.startsWith(`http://127.0.0.1:${port}/detail/`)), 'detail URLs should be absolute')
+
+  await sessionManager.closeAll()
+
+  const badCrawl = await scrapeJobList('bad-detail-direct', `http://127.0.0.1:${port}/jobs-bad-detail`, undefined, { maxPages: 1, maxJobs: 5 })
+  assert.strictEqual(badCrawl.jobs.length, 1, 'bad detail fixture should expose one list card')
+  assert.equal(badCrawl.jobs[0].detailUrl, undefined, 'bad detail fixture should force click fallback')
+  await assert.rejects(
+    () => scrapeJobDetail('bad-detail-direct', badCrawl.jobs[0]),
+    /still on the job list page|page does not expose detail markers/,
+    'click fallback must not treat the list page as a verified detail page',
+  )
+
+  await sessionManager.closeAll()
+  spaDetailHits.clear()
+
+  const spaCrawl = await scrapeJobList('spa-direct', spaJobsUrl, undefined, { maxPages: 3, maxJobs: 20 })
+  assert.strictEqual(spaCrawl.pagesScanned, 3, 'SPA crawl should scan all three batches even when URL does not change')
+  assert.strictEqual(spaCrawl.jobs.length, 5, 'SPA crawl should keep all unique cards')
+  assert(spaCrawl.jobs.every((job) => Number.isInteger(job.sourcePageIndex)), 'SPA jobs should record sourcePageIndex')
+  const spaTarget = spaCrawl.jobs.find((job) => job.title === 'Frontend Automation Engineer')
+  assert(spaTarget, 'SPA fixture should include the page-2 frontend target')
+  assert.strictEqual(spaTarget.sourcePageIndex, 2, 'SPA frontend target should remember that it came from page 2')
+  assert.strictEqual(spaTarget.detailUrl, undefined, 'SPA fixture should force click fallback without a detailUrl')
+  const spaDetail = await scrapeJobDetail('spa-direct', spaTarget)
+  assert(spaDetail.detailUrl.includes('/spa-detail?positionId=spa-good'), 'SPA fallback click should reach the real detail URL')
+  assert(!spaDetail.detailUrl.includes('/spa-jobs'), 'SPA fallback must not verify the list page as detail')
+  assert.strictEqual(spaDetail.job.sourcePageIndex, 2)
+  assert.strictEqual(spaDetailHits.get('spa-good'), 1, 'SPA page-2 target detail should be opened exactly once')
+
+  await sessionManager.closeAll()
+  spaDetailHits.clear()
+
+  const spaConfig = loadConfig()
+  spaConfig.resumePath = resumePath
+  spaConfig.trace.outDir = join(tmp, 'output')
+  spaConfig.browser.headless = true
+  spaConfig.browser.visualHighlight = false
+  spaConfig.browser.blockLocalhost = false
+  spaConfig.browser.allowedDomains = []
+  spaConfig.human.mode = 'auto'
+  spaConfig.model.apiKey = null
+  spaConfig.maxJobPagesToCrawl = 3
+  spaConfig.maxJobsToCrawl = 20
+  spaConfig.maxJobsToDetail = 1
+  spaConfig.matchThreshold = 0.45
+
+  const spaResult = await runJobApplicationAgent({
+    config: spaConfig,
+    mode: 'match',
+    startUrl: spaJobsUrl,
+    gate: new AutoHumanGate(),
+    runId: 'job-crawl-spa-fallback',
+  })
+  assert.strictEqual(spaResult.finalState, 'login_required', 'SPA match should stop at human handoff after verified detail')
+  assert.strictEqual(spaResult.chosenJob?.title, 'Frontend Automation Engineer')
+  assert.strictEqual(spaDetailHits.get('spa-good'), 1, 'orchestrator should open the SPA target detail once')
+  const spaFinal = JSON.parse(readFileSync(join(spaConfig.trace.outDir, 'job-crawl-spa-fallback', 'job-candidates-final.json'), 'utf8'))
+  assert.strictEqual(spaFinal.detailsAttempted, 1)
+  assert.strictEqual(spaFinal.detailsOpened, 1)
+  assert.strictEqual(spaFinal.detailsVerified, 1)
+  assert.strictEqual(spaFinal.detailsFailed, 0)
+  assert.strictEqual(spaFinal.candidates[0].sourcePageIndex, 2)
 
   await sessionManager.closeAll()
   detailHits.clear()
@@ -232,6 +422,8 @@ try {
   assert.strictEqual(coarse.pagesScanned, 3)
   assert.strictEqual(final.detailsAttempted, 2)
   assert.strictEqual(final.detailsOpened, 1)
+  assert.strictEqual(final.detailsVerified, 1)
+  assert.strictEqual(final.detailsFailed, 1)
   assert.strictEqual(final.decision.shouldApply, true)
   assert.strictEqual(final.candidates[0].title, 'Frontend Automation Engineer')
 

@@ -3,12 +3,21 @@ import { policyEngine } from './policy-engine.js'
 import type { PolicyEngineDecision, ToolPolicyInput } from './policy-engine.js'
 
 export {
+  inferActionIntent,
+} from './action-intent.js'
+
+export {
   gateKindForTool,
   policyEngine,
   PolicyEngine,
   policyRiskLevel,
   requiresHumanGate,
 } from './policy-engine.js'
+
+export type {
+  ActionIntent,
+  ActionIntentInput,
+} from './action-intent.js'
 
 export type {
   AgentSafetyMode,

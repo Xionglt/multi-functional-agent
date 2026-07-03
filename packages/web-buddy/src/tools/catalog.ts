@@ -139,7 +139,7 @@ export const TOOL_CATALOG: ToolDef[] = [
       },
       required: ['filePath'],
     },
-    local: { enabled: false },
+    local: { enabled: true },
     mcp: { enabled: true },
     metadata: { sensitiveInput: true, requiresConfirmation: true },
   },

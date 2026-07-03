@@ -450,7 +450,8 @@ function humanHandoffGateKindFor(
   if (state.phase === 'captcha_required') return 'captcha'
   if (state.phase === 'direct_submit_review') return 'final_submit'
   if (state.phase === 'ready_for_final_submit') return 'final_submit'
-  if (facts.gateKind === 'login' || facts.gateKind === 'captcha' || facts.gateKind === 'final_submit') return facts.gateKind
+  if (facts.gateKind === 'final_submit') return facts.gateKind
+  if ((facts.gateKind === 'login' || facts.gateKind === 'captcha') && facts.gateDecision !== 'approve') return facts.gateKind
   return undefined
 }
 

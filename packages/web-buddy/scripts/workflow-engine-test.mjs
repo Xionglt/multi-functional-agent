@@ -101,7 +101,7 @@ const directSubmitForm = form({
   fields: [field(0, '我已阅读并同意申请工作需知', '', false, 'checkbox')],
   missingRequired: [],
   filledFields: [],
-  submitCandidates: [{ tag: 'button', type: 'submit', text: '投递简历', risk: 'L3', visible: true }],
+  submitCandidates: [{ tag: 'button', type: 'submit', text: '确认投递', risk: 'L3', visible: true }],
 })
 const directSubmitReview = engine.evaluate({
   previous: enteringState(),
@@ -109,7 +109,7 @@ const directSubmitReview = engine.evaluate({
   page: page({
     url: 'https://example.test/apply/direct',
     title: 'Direct apply',
-    textSummary: '我已阅读并同意申请工作需知。投递简历',
+    textSummary: '我已阅读并同意申请工作需知。确认投递',
     inputCount: 1,
     buttonCount: 1,
   }),

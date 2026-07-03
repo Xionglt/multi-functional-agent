@@ -1,4 +1,5 @@
 import type { FormFieldOption, FormFieldState, FormState, SubmitCandidate, UploadHint } from './form-state.js'
+import { normalizePageFacts, type PageFacts } from './page-facts.js'
 
 export interface RawFormField {
   index?: number
@@ -48,6 +49,7 @@ export interface RawFormSnapshot {
   submitCandidates?: RawSubmitCandidate[]
   uploadHints?: RawUploadHint[]
   visibleErrors?: string[]
+  facts?: Partial<PageFacts>
 }
 
 export function buildFormState(raw: RawFormSnapshot, updatedAt = new Date().toISOString()): FormState {
@@ -55,6 +57,7 @@ export function buildFormState(raw: RawFormSnapshot, updatedAt = new Date().toIS
   const submitCandidates = (raw.submitCandidates ?? []).map(toSubmitCandidate).filter((candidate) => candidate.text)
   const uploadHints = (raw.uploadHints ?? []).map(toUploadHint).filter((hint) => hint.text || hint.type === 'file')
   const visibleErrors = (raw.visibleErrors ?? []).map(normalize).filter(Boolean)
+  const facts = normalizePageFacts(raw.facts)
   return {
     schemaVersion: 'form-state/v1',
     url: raw.url ?? '',
@@ -64,6 +67,7 @@ export function buildFormState(raw: RawFormSnapshot, updatedAt = new Date().toIS
     submitCandidates,
     uploadHints,
     visibleErrors,
+    ...(facts ? { facts } : {}),
     updatedAt,
   }
 }

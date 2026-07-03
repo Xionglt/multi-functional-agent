@@ -1,4 +1,5 @@
 import type { FormFieldState, FormState, SubmitCandidate, UploadHint } from '../observation/form-state.js'
+import type { PageFacts, PageButtonFact } from '../observation/page-facts.js'
 import type { PageState } from '../observation/page-state.js'
 import { createDefaultTaskState, type TaskState } from '../task/task-state.js'
 import type { WorkflowState } from '../workflow/workflow-state.js'
@@ -182,6 +183,7 @@ function renderPageState(page: PageState | undefined, freshness: ContextFreshnes
     `title: ${page.title || '(untitled)'}`,
     `pageType: ${page.pageType}`,
     `counts: interactive=${page.interactiveCount}, forms=${page.formCount}, links=${page.linkCount}, buttons=${page.buttonCount}, inputs=${page.inputCount}`,
+    page.facts ? `facts:\n${renderPageFacts(page.facts)}` : undefined,
     renderFreshnessCue('page', freshness),
     `textSummary: ${page.textSummary || '(empty)'}`,
     `updatedAt: ${page.updatedAt}`,
@@ -213,6 +215,7 @@ function renderFormState(form: FormState | undefined, freshness: ContextFreshnes
     'submitCandidates:',
     renderSubmitCandidates(form.submitCandidates),
     form.uploadHints?.length ? `\nuploadHints:\n${renderUploadHints(form.uploadHints)}` : undefined,
+    form.facts ? `\nfacts:\n${renderPageFacts(form.facts)}` : undefined,
     form.visibleErrors?.length ? `\nvisibleErrors:\n${form.visibleErrors.map((error) => `- ${oneLine(error, 180)}`).join('\n')}` : undefined,
     `updatedAt: ${form.updatedAt}`,
   ])
@@ -289,6 +292,40 @@ function renderUploadHints(hints: UploadHint[]): string {
   })
   if (hints.length > shown.length) lines.push(`- ... (${hints.length - shown.length} more upload hints)`)
   return lines.join('\n')
+}
+
+function renderPageFacts(facts: PageFacts): string {
+  return normalizeLines([
+    `- hasAgreementCheckbox=${facts.hasAgreementCheckbox}`,
+    `- agreementChecked=${facts.agreementChecked}`,
+    `- hasApplicationQuotaDialog=${facts.hasApplicationQuotaDialog}`,
+    facts.quotaDialogText ? `- quotaDialogText="${oneLine(facts.quotaDialogText, 180)}"` : undefined,
+    `- hasRealUploadInput=${facts.hasRealUploadInput}`,
+    `- uploadCandidateCount=${facts.uploadCandidateCount}`,
+    facts.visibleBlockingDialog.present
+      ? `- visibleBlockingDialog=${facts.visibleBlockingDialog.kind || 'unknown'} "${oneLine(facts.visibleBlockingDialog.text || '', 180)}"`
+      : '- visibleBlockingDialog=false',
+    `- submitLikeButtons: ${renderFactButtonsInline(facts.submitLikeButtons)}`,
+    `- likelyApplyEntryButtons: ${renderFactButtonsInline(facts.likelyApplyEntryButtons)}`,
+    `- likelyFinalSubmitButtons: ${renderFactButtonsInline(facts.likelyFinalSubmitButtons)}`,
+  ])
+}
+
+function renderFactButtonsInline(buttons: PageButtonFact[]): string {
+  if (buttons.length === 0) return '(none)'
+  return buttons
+    .slice(0, 8)
+    .map((button) => {
+      const attrs = [
+        oneLine(button.text || '(no text)', 80),
+        button.tag ? `tag=${button.tag}` : '',
+        button.type ? `type=${button.type}` : '',
+        button.role ? `role=${button.role}` : '',
+        button.disabled ? 'disabled=true' : '',
+      ].filter(Boolean)
+      return `[${attrs.join(' | ')}]`
+    })
+    .join(', ')
 }
 
 function renderStringList(values: string[]): string {

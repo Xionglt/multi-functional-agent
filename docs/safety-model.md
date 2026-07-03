@@ -25,6 +25,27 @@ human-controlled and auditable.
 | `L3` | Submit-like, apply-like, save-like, or other high-impact actions. | Gate or block depending on workflow phase and target. |
 | `L4` | Passwords, captchas, uploads, payment, credentials, or verification. | Human handoff or block. |
 
+## ActionIntent Boundary
+
+The runtime must not turn a real recruiting site into a fully hard-coded site
+script. The model remains responsible for reading the current page and choosing
+the next step. Safety code only normalizes the proposed tool call into an
+action intent and applies the appropriate gate.
+
+Important intents:
+
+| Intent | Examples | Contract |
+| --- | --- | --- |
+| `high_risk_action` / `apply_entry` | Opening an application flow, clicking a detail-page apply button, accepting a non-final apply dialog. | Ask or auto-allow only when the permission mode permits non-final L3 actions; after approval, execute, refresh context, and continue. |
+| `upload_resume` | Attaching a local resume or file through a real upload control. | Always ask; must be tied to `input[type=file]` or a clear upload trigger. |
+| `save_resume` | Saving or persisting profile/resume data on the site. | Always ask. |
+| `final_submit` | Final application submission, payment, publish, send, confirm-submit, or equivalent. | Do not auto-execute on real external sites. |
+| `agent_done` | The model says the task is complete or blocked. | Route through completion checks; do not accept premature completion when safe next actions remain. |
+
+This boundary is intentionally narrower than a workflow definition. It lets a
+site-specific phrase such as `投递简历` be treated as an application entry on a
+job-detail page, while `确认投递` or `提交申请` remains a final-submit boundary.
+
 ## PolicyEngine Decisions
 
 `PolicyEngine.evaluate()` is the policy boundary before tool execution. It
@@ -89,6 +110,26 @@ Default checkpoints:
 | `save_resume` | The task wants to persist a site-side draft or profile. |
 | `final_submit` | The task wants to submit, apply, pay, confirm, or send a final action. |
 
+## Resumable Gate Lifecycle
+
+Human gates are resumable pauses, not task termination. The normal lifecycle is:
+
+```text
+ask -> approve -> execute -> refresh context -> continue
+```
+
+Decline, takeover, login, captcha, and explicit stop decisions may block or end a
+run, but approval of a non-final high-risk action should not mark the task done.
+After executing an approved action, the runtime should refresh page/form
+observations and give the model the updated state.
+
+For `final_submit`, approval is treated as awareness/coordination, not automatic
+permission to click a true final-submit control on a real external site. The
+runtime returns an observation such as
+`FINAL_SUBMIT_NOT_EXECUTED_AUTOMATICALLY` and lets the model either continue
+safe checks, wait for manual completion, or call `agent_done` with an accurate
+blocked/complete summary.
+
 ## Workflow Phases And Sensitive Gates
 
 The runtime tracks a minimal `WorkflowState` working set. Policy uses this state
@@ -125,6 +166,22 @@ The hard gate is stronger than permission-mode auto-allow:
   those do not apply to real external sites.
 - Direct-submit pages map submit-like clicks to `final_submit` when the
   workflow phase is `direct_submit_review`.
+- A `final_submit` gate must not kill the task by itself. It should preserve the
+  safety boundary and return control to the agent/user unless the user explicitly
+  stops, takes over, or no safe next action exists.
+
+## Upload Resume Contract
+
+Uploading a local resume is sensitive because it sends user data to an external
+site. `upload_resume` must be tied to a real upload target:
+
+- `input[type=file]`
+- A visible upload/re-upload/attachment/choose-file/resume-parse control
+- A control proven by the page to open a file chooser
+
+Apply/submit buttons are not upload targets. Text such as `投递简历`, `投递`,
+`申请`, `提交`, or `确认投递` must not be treated as an upload entry unless the
+DOM or file-chooser behavior proves it is actually an upload control.
 
 ## Direct-Submit Review Boundary
 
@@ -136,6 +193,21 @@ form-fill failure.
 When detected, the workflow enters `direct_submit_review`, writes
 `direct-submit-review.json`, explains that no fillable fields were found, and
 stops before the next `final_submit` step.
+
+## Completion Gate And agent_done
+
+`agent_done` is a model claim, not authoritative runtime truth. Completion checks
+should reject or downgrade completion when evidence shows:
+
+- A confirmation dialog is still open and has safe next actions.
+- A login/captcha/upload/save/final-submit gate is pending.
+- The model has not refreshed context after an approved high-risk action.
+- The page shows unresolved required fields, validation errors, or review
+  boundaries.
+
+If the agent is truly blocked, the completion summary should identify the human
+decision or page evidence. If the user manually completes a final submit, the
+runtime should require fresh observation before claiming success.
 
 ## Login And Captcha Handoff Contract
 

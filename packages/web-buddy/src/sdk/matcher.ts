@@ -214,7 +214,10 @@ export function decideMatchThreshold(
   threshold = DEFAULT_MATCH_THRESHOLD,
 ): MatchThresholdDecision {
   const safeThreshold = clamp01(threshold)
-  const best = matches[0]
+  const best = matches.reduce<MatchScore | undefined>(
+    (currentBest, match) => !currentBest || match.score > currentBest.score ? match : currentBest,
+    undefined,
+  )
   if (!best) {
     return {
       threshold: safeThreshold,

@@ -154,6 +154,89 @@ assert.equal(llmCalls.length, 1, 'LLM should be called once')
 assert.equal(llmCalls[0]?.redactTrace, true, 'resume LLM calls must request trace redaction')
 assert(!llmProfile.email?.evidence?.includes('alex.fixture@example.test'), 'email evidence should be redacted')
 
+const looseJsonCalls = []
+const looseQwenStyleLlm = {
+  hasKey: true,
+  async generateJson(_system, _user, options) {
+    looseJsonCalls.push(options)
+    return {
+      profile: {
+        name: 'Alex Fixture',
+        email: null,
+        phone: 'bad phone',
+        location: 'Seattle',
+        summary: 'Frontend engineer focused on browser automation.',
+        target_roles: ['Frontend Engineer', 'Browser Automation Engineer'],
+        skills: ['TypeScript', 'React', 'Playwright'],
+        projects: [{
+          project: 'Application automation',
+          role: 'Lead engineer',
+          techStack: ['Playwright', 'TypeScript'],
+          description: 'Built browser automation workflows.',
+        }],
+        work_experience: [{
+          company: 'Fixture Labs',
+          position: 'Senior Frontend Engineer',
+          time: '2020-Present',
+          desc: 'Built internal tooling.',
+        }],
+        education: null,
+        keywords: 'frontend,typescript,browser automation',
+        seniority: { value: 'senior', confidence: '80', evidence: ['senior title'] },
+      },
+    }
+  },
+}
+const looseProfile = await readResumeV2(TXT_RESUME, { llm: looseQwenStyleLlm })
+assertResumeV2Shape(looseProfile, 'looseProfile')
+assert.equal(looseProfile.source.parser, 'llm_with_heuristic_repair')
+assert.equal(looseJsonCalls.length, 1, 'loose Qwen-style JSON should be normalized without a repair LLM call')
+assert(looseProfile.skills.value.includes('TypeScript'), 'loose JSON skills array should be preserved')
+assert.equal(looseProfile.email?.value, 'alex.fixture@example.test', 'loose JSON should still receive deterministic email repair')
+assert.equal(looseProfile.phone?.value, '+1 555 010 2233', 'loose JSON should still receive deterministic phone repair')
+assert(looseProfile.source.extractionWarnings.some((warning) => warning.includes('normalized before schema validation')))
+
+const sparseLlm = {
+  hasKey: true,
+  async generateJson() {
+    return {
+      skills: ['React', 'TypeScript'],
+      keywords: ['frontend'],
+    }
+  },
+}
+const sparseProfile = await readResumeV2(TXT_RESUME, { llm: sparseLlm })
+assertResumeV2Shape(sparseProfile, 'sparseProfile')
+assert.equal(sparseProfile.source.parser, 'llm_with_heuristic_repair')
+assert(sparseProfile.targetRoles.value.length >= 1, 'sparse LLM output should receive deterministic target-role backfill')
+assert(sparseProfile.experience.value.length >= 1, 'sparse LLM output should receive deterministic experience backfill')
+assert(sparseProfile.source.extractionWarnings.some((warning) => warning.includes('Target roles backfilled')))
+assert(sparseProfile.source.extractionWarnings.some((warning) => warning.includes('Experience backfilled')))
+
+let repairCallCount = 0
+const repairableLlm = {
+  hasKey: true,
+  async generateJson() {
+    repairCallCount += 1
+    if (repairCallCount === 1) return { raw: 'not enough structured data' }
+    return {
+      schemaVersion: 'resume-profile/v2',
+      name: { value: 'Alex Fixture', confidence: 0.8, evidence: 'name field' },
+      targetRoles: { value: ['Frontend Engineer'], confidence: 0.8, evidence: 'target role' },
+      skills: { value: ['typescript', 'react'], confidence: 0.8, evidence: 'skills' },
+      projects: { value: [], confidence: 0.2, evidence: 'no project section' },
+      experience: { value: [], confidence: 0.2, evidence: 'no experience section' },
+      education: { value: [], confidence: 0.2, evidence: 'no education section' },
+      keywords: { value: ['frontend'], confidence: 0.7, evidence: 'keywords' },
+    }
+  },
+}
+const repairedProfile = await readResumeV2(TXT_RESUME, { llm: repairableLlm })
+assertResumeV2Shape(repairedProfile, 'repairedProfile')
+assert.equal(repairCallCount, 2, 'repairable malformed JSON should trigger one repair LLM call')
+assert.equal(repairedProfile.source.parser, 'llm_with_heuristic_repair')
+assert(repairedProfile.source.extractionWarnings.some((warning) => warning.includes('repaired after schema validation failure')))
+
 const malformedLlm = {
   hasKey: true,
   async generateJson() {

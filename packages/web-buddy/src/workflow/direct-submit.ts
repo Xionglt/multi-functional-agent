@@ -74,8 +74,12 @@ const APPLICATION_NOTICE_TEXT =
   /申请工作需知|申请工作须知|投递须知|投递需知|申请须知|应聘须知|同意.*(协议|条款|声明|须知|需知)|已阅读.*(协议|条款|声明|须知|需知)|application notice|job application notice|terms and conditions/i
 const SUBMIT_APPLY_TEXT =
   /投递简历|立即投递|确认投递|提交申请|申请职位|递交申请|submit application|apply now|start application|apply|submit/i
+const FINAL_SUBMIT_TEXT =
+  /确认投递|确认提交|提交申请|递交申请|最终提交|submit application|submit$/i
+const APPLICATION_ENTRY_TEXT =
+  /^(投递简历|立即投递|申请职位|开始申请|start application|apply now|apply)$/i
 const LOGIN_WALL_TEXT =
-  /login|log in|sign in|signin|sso|auth|password|登录|登陆|登入|账号登录|密码登录|短信登录|统一认证|单点登录/i
+  /login|log in|sign in|signin|sso|auth|password|密码登录|短信登录|账号登录|统一认证|单点登录|请登录|登录后|登陆后|登入后/i
 const NON_FILLABLE_INPUT_TYPES = new Set(['hidden', 'button', 'submit', 'reset', 'image'])
 const CHOICE_INPUT_TYPES = new Set(['checkbox', 'radio'])
 
@@ -203,12 +207,14 @@ export function inspectDirectSubmitReview(input: DirectSubmitInspectionInput): D
   }
 
   const hasAgreementOrNotice = signals.agreementCheckboxCount > 0 || signals.noticeTextPresent
+  const hasFinalSubmitCandidate = submitCandidates.some((candidate) => FINAL_SUBMIT_TEXT.test(candidate.text))
   const detected =
     !signals.loginWall &&
     signals.realFillableFieldCount === 0 &&
     signals.nonAgreementChoiceCount === 0 &&
     hasAgreementOrNotice &&
-    signals.submitApplyButtonCount > 0
+    signals.submitApplyButtonCount > 0 &&
+    hasFinalSubmitCandidate
 
   if (detected) {
     return {
@@ -326,5 +332,8 @@ function directSubmitNegativeReason(signals: DirectSubmitSignals): string {
   if (signals.nonAgreementChoiceCount > 0) return 'Page has non-agreement checkbox/radio choices.'
   if (signals.agreementCheckboxCount === 0 && !signals.noticeTextPresent) return 'No agreement checkbox or application notice was detected.'
   if (signals.submitApplyButtonCount === 0) return 'No submit/apply button was detected.'
+  if (signals.submitCandidates.length > 0 && signals.submitCandidates.every((candidate) => APPLICATION_ENTRY_TEXT.test(candidate.text))) {
+    return 'Only application-entry apply buttons were detected; this may lead to a fillable form rather than final submission.'
+  }
   return 'Direct-submit signals were incomplete.'
 }

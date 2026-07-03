@@ -293,6 +293,7 @@ function summarizePage(
     linkCount: page.linkCount,
     buttonCount: page.buttonCount,
     inputCount: page.inputCount,
+    ...(page.facts ? { facts: page.facts } : {}),
     updatedAt: page.updatedAt,
   }
 }
@@ -324,6 +325,7 @@ function summarizeForm(latestContext: ContextSnapshot | undefined): CompactFormS
       ...(hint.visible !== undefined ? { visible: hint.visible } : {}),
     })),
     visibleErrors: trimStringList(form.visibleErrors ?? [], 12, 180),
+    ...(form.facts ? { facts: form.facts } : {}),
     updatedAt: form.updatedAt,
   }
 }

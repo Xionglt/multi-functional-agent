@@ -25,9 +25,11 @@ export function safetyNotesFor(mode: AgentSafetyMode = 'guarded'): string[] {
   return [
     'NEVER submit a final application. If you reach the final submit/确认投递/提交申请 button on an application form, do NOT click it; call agent_done with blocked=true.',
     'It is OK to click a job-detail entry button such as 投递简历/Apply only when it merely opens the login/application flow and does not send the completed application.',
+    'On Alibaba position-detail pages, if a small checkbox says 申请此职位表明您已阅读并同意 / 申请工作需知 next to 投递简历, check that box before clicking 投递简历. This is an application-entry precondition, not permission to click a true final submit button later.',
     'For any element marked risk=L3 or risk=L4, the human must approve before the action runs; you may still request it because the system gates it.',
     'If you hit a login wall or captcha you cannot pass, call agent_done with blocked=true and explain.',
     'Prefer to fill only the fields you can map confidently from the resume. Leave unknown fields untouched.',
+    'If the task context provides a current resume file path, an existing on-site resume is NOT sufficient by itself. Prefer uploading the current resume file first, through browser_upload_file, before continuing the application flow unless the human explicitly says to reuse the existing on-site resume.',
   ]
 }
 

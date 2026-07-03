@@ -2,6 +2,7 @@ import type { ContextFreshness } from '../context/types.js'
 import type { GateKind } from '../sdk/human.js'
 import type { RiskLevel } from '../sdk/trace.js'
 import type { WorkflowPhase, WorkflowState } from '../workflow/workflow-state.js'
+import { inferActionIntent, type ActionIntent } from './action-intent.js'
 
 export type AgentSafetyMode = 'guarded' | 'raw'
 export type PolicyAction = 'allow' | 'gate' | 'block' | 'auto_confirm'
@@ -11,6 +12,7 @@ export interface PolicyDecision {
   action: PolicyAction
   riskLevel: PolicyRiskLevel
   reason: string
+  actionIntent?: ActionIntent
   gateKind?: GateKind
   requiresFreshContext?: boolean
 }
@@ -30,6 +32,7 @@ export interface PolicyEngineInput {
   safetyMode?: AgentSafetyMode
   currentUrl?: string
   refLabel?: string
+  contextText?: string
   freshness?: PolicyFreshnessSummary | ContextFreshness
   workflowState?: WorkflowState
   workflowPhase?: WorkflowPhase
@@ -52,13 +55,9 @@ interface DecisionRule {
   tags: string[]
 }
 
-const FINAL_ACTION_TEXT =
-  /submit|投递|提交|申请|递交|deliver|apply|send|confirm|确认|pay|支付|publish|发布/i
-const APPLY_ENTRY_TEXT = /apply|投递|投递简历|立即投递|申请职位|start application|开始申请/i
-const REVIEW_SUBMIT_TEXT = /submit|提交|提交申请|确认提交|confirm|确认|pay|支付|publish|发布|send|递交/i
-
 export class PolicyEngine {
   evaluate(input: PolicyEngineInput): PolicyEngineDecision {
+    const actionIntent = inferActionIntent(input)
     const riskLevel = policyRiskLevel(input.risk)
     const workflowPhase = workflowPhaseFor(input)
     const requiresFreshContext = requiresHumanGate(input.risk)
@@ -75,20 +74,22 @@ export class PolicyEngine {
           tags: ['low_risk'],
         },
         workflowPhase,
+        actionIntent,
       })
     }
 
-    const gateKind = gateKindForTool(input)
+    const gateKind = gateKindForActionIntent(actionIntent)
     const rawAutoConfirm = input.safetyMode === 'raw' && isAutoConfirmClick(input.toolName)
     const rule = rawAutoConfirm
       ? rawAutoConfirmRule()
       : freshnessCue
         ? staleHighRiskRule(freshnessCue)
-        : workflowRuleFor(input, gateKind, workflowPhase) ?? highRiskGateRule(gateKind)
+        : workflowRuleFor(actionIntent, gateKind, workflowPhase) ?? highRiskGateRule(gateKind)
 
     return buildDecision({
       action: rawAutoConfirm ? 'auto_confirm' : freshnessCue ? 'block' : 'gate',
       riskLevel,
+      actionIntent,
       gateKind,
       requiresFreshContext,
       reasonOverride: freshnessCue,
@@ -97,6 +98,7 @@ export class PolicyEngine {
       extraTags: [
         input.safetyMode === 'raw' ? 'safety:raw' : 'safety:guarded',
         freshnessCue ? 'freshness:stale' : undefined,
+        `intent:${actionIntent}`,
         `gate:${gateKind}`,
       ],
     })
@@ -106,14 +108,9 @@ export class PolicyEngine {
 export const policyEngine = new PolicyEngine()
 
 export function gateKindForTool(
-  input: Pick<PolicyEngineInput, 'toolName' | 'args' | 'currentUrl' | 'refLabel' | 'workflowState' | 'workflowPhase'>,
+  input: Pick<PolicyEngineInput, 'toolName' | 'args' | 'risk' | 'currentUrl' | 'refLabel' | 'contextText' | 'workflowState' | 'workflowPhase'>,
 ): GateKind {
-  const phase = workflowPhaseFor(input)
-  if (phase === 'login_required') return 'login'
-  if (phase === 'captcha_required') return 'captcha'
-  if (input.toolName === 'browser_click') return gateKindForClick(input)
-  if (input.toolName === 'browser_click_text') return gateKindForClickText(input.args, phase)
-  return 'high_risk_action'
+  return gateKindForActionIntent(inferActionIntent(input))
 }
 
 export function policyRiskLevel(risk: RiskLevel | undefined): PolicyRiskLevel {
@@ -131,6 +128,7 @@ function buildDecision(input: {
   action: PolicyAction
   riskLevel: PolicyRiskLevel
   rule: DecisionRule
+  actionIntent?: ActionIntent
   gateKind?: GateKind
   requiresFreshContext?: boolean
   reasonOverride?: string
@@ -142,11 +140,13 @@ function buildDecision(input: {
     action: input.action,
     riskLevel: input.riskLevel,
     reason: input.reasonOverride ?? input.rule.reason,
+    ...(input.actionIntent ? { actionIntent: input.actionIntent } : {}),
     policyCode: input.rule.policyCode,
     ruleId: input.rule.ruleId,
     auditTags: unique([
       `action:${input.action}`,
       `risk:${input.riskLevel}`,
+      ...(input.actionIntent ? [`intent:${input.actionIntent}`] : []),
       ...input.rule.tags,
       ...(input.workflowPhase ? [`workflow:${input.workflowPhase}`] : []),
       ...(input.extraTags ?? []),
@@ -157,53 +157,21 @@ function buildDecision(input: {
   }
 }
 
-function gateKindForClick(
-  input: Pick<PolicyEngineInput, 'args' | 'currentUrl' | 'refLabel' | 'workflowState' | 'workflowPhase'>,
-): GateKind {
-  const label = String(input.refLabel ?? '')
-  const phase = workflowPhaseFor(input)
-  const workflowKind = workflowGateKindForText(label, phase)
-  if (workflowKind) return workflowKind
-  const currentUrl = input.currentUrl ?? ''
-  const isAlibabaDetailEntry =
-    /talent-holding\.alibaba\.com\/off-campus\/position-detail/i.test(currentUrl) &&
-    /投递简历|立即投递|apply/i.test(label)
-  if (isAlibabaDetailEntry) return 'high_risk_action'
-  return FINAL_ACTION_TEXT.test(label) ? 'final_submit' : 'high_risk_action'
-}
-
-function gateKindForClickText(args: Record<string, unknown>, phase: WorkflowPhase | undefined): GateKind {
-  const text = String(args.text ?? '')
-  const workflowKind = workflowGateKindForText(text, phase)
-  if (workflowKind) return workflowKind
-  return FINAL_ACTION_TEXT.test(text) ? 'final_submit' : 'high_risk_action'
-}
-
-function workflowGateKindForText(text: string, phase: WorkflowPhase | undefined): GateKind | undefined {
-  if (!phase) return undefined
-  if ((phase === 'job_detail' || phase === 'entering_application') && APPLY_ENTRY_TEXT.test(text)) {
-    return 'high_risk_action'
-  }
-  if (phase === 'direct_submit_review' && (REVIEW_SUBMIT_TEXT.test(text) || APPLY_ENTRY_TEXT.test(text))) {
-    return 'final_submit'
-  }
-  if (
-    (phase === 'reviewing' || phase === 'ready_for_final_submit') &&
-    REVIEW_SUBMIT_TEXT.test(text)
-  ) {
-    return 'final_submit'
-  }
-  if (phase === 'login_required') return 'login'
-  if (phase === 'captcha_required') return 'captcha'
-  return undefined
+function gateKindForActionIntent(intent: ActionIntent): GateKind {
+  if (intent === 'login') return 'login'
+  if (intent === 'captcha') return 'captcha'
+  if (intent === 'upload_resume') return 'upload_resume'
+  if (intent === 'save_draft') return 'save_resume'
+  if (intent === 'final_submit') return 'final_submit'
+  return 'high_risk_action'
 }
 
 function workflowRuleFor(
-  input: PolicyEngineInput,
+  actionIntent: ActionIntent,
   gateKind: GateKind,
   phase: WorkflowPhase | undefined,
 ): DecisionRule | undefined {
-  if (phase === 'login_required') {
+  if (actionIntent === 'login') {
     return {
       policyCode: 'policy.workflow.login_required',
       ruleId: 'policy.workflow.login_required.v1',
@@ -211,7 +179,7 @@ function workflowRuleFor(
       tags: ['workflow', 'login_required', 'human_handoff'],
     }
   }
-  if (phase === 'captcha_required') {
+  if (actionIntent === 'captcha') {
     return {
       policyCode: 'policy.workflow.captcha_required',
       ruleId: 'policy.workflow.captcha_required.v1',
@@ -220,8 +188,23 @@ function workflowRuleFor(
     }
   }
 
-  const text = policyTextFor(input)
-  if ((phase === 'job_detail' || phase === 'entering_application') && APPLY_ENTRY_TEXT.test(text)) {
+  if (actionIntent === 'upload_resume') {
+    return {
+      policyCode: 'policy.workflow.upload_resume',
+      ruleId: 'policy.workflow.upload_resume.v1',
+      reason: 'Resume upload requires approval and must be bound to a real upload control.',
+      tags: ['workflow', 'upload_resume'],
+    }
+  }
+  if (actionIntent === 'save_draft') {
+    return {
+      policyCode: 'policy.workflow.save_draft',
+      ruleId: 'policy.workflow.save_draft.v1',
+      reason: 'Saving an application or resume draft requires a human gate.',
+      tags: ['workflow', 'save_draft'],
+    }
+  }
+  if (actionIntent === 'apply_entry') {
     return {
       policyCode: 'policy.workflow.apply_entry',
       ruleId: 'policy.workflow.apply_entry.v1',
@@ -229,7 +212,15 @@ function workflowRuleFor(
       tags: ['workflow', 'apply_entry'],
     }
   }
-  if (phase === 'direct_submit_review' && (REVIEW_SUBMIT_TEXT.test(text) || APPLY_ENTRY_TEXT.test(text))) {
+  if (actionIntent === 'application_confirm') {
+    return {
+      policyCode: 'policy.workflow.application_confirm',
+      ruleId: 'policy.workflow.application_confirm.v1',
+      reason: 'Application-confirm action requires a high-risk gate but is not a final-submit action.',
+      tags: ['workflow', 'application_confirm'],
+    }
+  }
+  if (actionIntent === 'final_submit' && phase === 'direct_submit_review') {
     return {
       policyCode: 'policy.workflow.final_submit',
       ruleId: 'policy.workflow.final_submit.v1',
@@ -237,10 +228,7 @@ function workflowRuleFor(
       tags: ['workflow', 'final_submit'],
     }
   }
-  if (
-    (phase === 'reviewing' || phase === 'ready_for_final_submit') &&
-    REVIEW_SUBMIT_TEXT.test(text)
-  ) {
+  if (actionIntent === 'final_submit' && (phase === 'reviewing' || phase === 'ready_for_final_submit')) {
     return {
       policyCode: 'policy.workflow.final_submit',
       ruleId: 'policy.workflow.final_submit.v1',
@@ -248,7 +236,7 @@ function workflowRuleFor(
       tags: ['workflow', 'final_submit'],
     }
   }
-  if (gateKind === 'final_submit') {
+  if (actionIntent === 'final_submit' || gateKind === 'final_submit') {
     return {
       policyCode: 'policy.high_risk.gate',
       ruleId: 'policy.high_risk.gate.v1',
@@ -290,12 +278,6 @@ function workflowPhaseFor(input: Pick<PolicyEngineInput, 'workflowState' | 'work
   return input.workflowPhase ?? input.workflowState?.phase
 }
 
-function policyTextFor(input: Pick<PolicyEngineInput, 'toolName' | 'args' | 'refLabel'>): string {
-  if (input.toolName === 'browser_click') return String(input.refLabel ?? '')
-  if (input.toolName === 'browser_click_text') return String(input.args.text ?? '')
-  return ''
-}
-
 function isAutoConfirmClick(toolName: string): boolean {
   return toolName === 'browser_click' || toolName === 'browser_click_text'
 }
@@ -304,6 +286,8 @@ function reasonForGate(gateKind: GateKind): string {
   if (gateKind === 'final_submit') return 'Submit-like action requires the final-submit safety gate.'
   if (gateKind === 'login') return 'Login step requires the login human gate.'
   if (gateKind === 'captcha') return 'Captcha step requires the captcha human gate.'
+  if (gateKind === 'upload_resume') return 'Resume upload requires approval.'
+  if (gateKind === 'save_resume') return 'Saving the resume or application draft requires approval.'
   return 'High-risk tool action requires a human gate.'
 }
 

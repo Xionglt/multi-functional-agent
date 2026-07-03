@@ -21,6 +21,99 @@ const blockedRuntime = CompletionGate.evaluate({
 assert.equal(blockedRuntime.action, 'block')
 assert.equal(blockedRuntime.recommendedStatus, 'blocked')
 
+const rejectedAlibabaConfirmation = CompletionGate.evaluate({
+  done: true,
+  blocked: true,
+  workflowEvaluation: evaluation({ phase: 'job_detail' }),
+  page: pageState({
+    url: 'https://talent-holding.alibaba.com/off-campus/position-detail?lang=zh&positionId=fixture',
+    pageType: 'detail',
+    textSummary: '温馨提示：你暂未申请职位，本月能申请5个职位，请慎重选择！ 取消 投递',
+  }),
+  form: formState({
+    submitCandidates: [
+      submitCandidate('取消'),
+      submitCandidate('投递'),
+    ],
+  }),
+  source: 'agent_done',
+})
+assert.equal(rejectedAlibabaConfirmation.action, 'reject')
+assert.equal(rejectedAlibabaConfirmation.recommendedStatus, 'unchanged')
+assert.match(rejectedAlibabaConfirmation.reason, /ALIBABA_APPLICATION_CONFIRMATION_STILL_OPEN/)
+assert.match(rejectedAlibabaConfirmation.reason, /投递/)
+assert.match(rejectedAlibabaConfirmation.reason, /取消/)
+
+const rejectedUploadEntry = CompletionGate.evaluate({
+  done: true,
+  blocked: true,
+  workflowEvaluation: evaluation({ phase: 'editing_resume' }),
+  page: pageState({ pageType: 'form', textSummary: 'Application form 上传附件简历' }),
+  form: formState({
+    uploadHints: [{ tag: 'input', type: 'file', text: '上传附件简历', visible: true, accept: '.pdf' }],
+  }),
+  source: 'agent_done',
+})
+assert.equal(rejectedUploadEntry.action, 'reject')
+assert.match(rejectedUploadEntry.reason, /upload entry/i)
+
+const rejectedMissingRequired = CompletionGate.evaluate({
+  done: true,
+  blocked: true,
+  workflowEvaluation: evaluation({ phase: 'filling_application' }),
+  page: pageState({ pageType: 'form', textSummary: 'Application form' }),
+  form: formState({
+    fields: [requiredField('姓名')],
+    missingRequired: [requiredField('姓名')],
+  }),
+  source: 'agent_done',
+})
+assert.equal(rejectedMissingRequired.action, 'reject')
+assert.match(rejectedMissingRequired.reason, /required form field/i)
+assert.match(rejectedMissingRequired.reason, /姓名/)
+
+const rejectedAfterLoginCleared = CompletionGate.evaluate({
+  done: true,
+  blocked: true,
+  workflowEvaluation: evaluation({
+    phase: 'filling_application',
+    state: workflowState('filling_application', {
+      lastTransition: {
+        from: 'login_required',
+        to: 'filling_application',
+        reason: 'Human handoff appears cleared and the current page has application form fields.',
+        at: '2026-06-30T00:00:01.000Z',
+      },
+    }),
+  }),
+  page: pageState({ pageType: 'form', textSummary: 'Application form' }),
+  form: formState({ fields: [filledField('姓名', 'Zhang San')] }),
+  source: 'agent_done',
+})
+assert.equal(rejectedAfterLoginCleared.action, 'reject')
+assert.match(rejectedAfterLoginCleared.reason, /login\/captcha handoff has cleared/i)
+
+const rejectedAfterCaptchaCleared = CompletionGate.evaluate({
+  done: true,
+  blocked: true,
+  workflowEvaluation: evaluation({
+    phase: 'job_detail',
+    state: workflowState('job_detail', {
+      lastTransition: {
+        from: 'captcha_required',
+        to: 'job_detail',
+        reason: 'Human handoff appears cleared and the current page is a job detail page.',
+        at: '2026-06-30T00:00:01.000Z',
+      },
+    }),
+  }),
+  page: pageState({ pageType: 'detail', textSummary: '岗位详情 立即投递', interactiveCount: 1, buttonCount: 1 }),
+  form: formState({ submitCandidates: [submitCandidate('立即投递')] }),
+  source: 'agent_done',
+})
+assert.equal(rejectedAfterCaptchaCleared.action, 'reject')
+assert.match(rejectedAfterCaptchaCleared.reason, /business workflow/i)
+
 const ignoredWithoutEvaluation = CompletionGate.evaluate({
   done: true,
   blocked: false,
@@ -100,7 +193,7 @@ console.log('completion-gate-test: PASS')
 function evaluation(overrides = {}) {
   const phase = overrides.phase ?? 'done'
   return {
-    state: workflowState(phase),
+    state: overrides.state ?? workflowState(phase),
     changed: false,
     matchedCriteria: [],
     missingCriteria: overrides.missingCriteria ?? [],
@@ -110,13 +203,72 @@ function evaluation(overrides = {}) {
   }
 }
 
-function workflowState(phase) {
+function workflowState(phase, overrides = {}) {
   return {
     schemaVersion: 'workflow-state/v1',
     phase,
     confidence: 'high',
     reason: `Test workflow phase is ${phase}.`,
     updatedAt: '2026-06-30T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function pageState(overrides = {}) {
+  return {
+    schemaVersion: 'page-state/v1',
+    url: 'https://example.test/apply',
+    title: 'Application',
+    pageType: 'form',
+    interactiveCount: 2,
+    formCount: 1,
+    linkCount: 0,
+    buttonCount: 0,
+    inputCount: 1,
+    textSummary: 'Application form',
+    updatedAt: '2026-06-30T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function formState(overrides = {}) {
+  return {
+    schemaVersion: 'form-state/v1',
+    url: 'https://example.test/apply',
+    fields: [],
+    missingRequired: [],
+    filledFields: [],
+    submitCandidates: [],
+    uploadHints: [],
+    visibleErrors: [],
+    updatedAt: '2026-06-30T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function submitCandidate(text) {
+  return { tag: 'button', text, visible: true, risk: 'L1' }
+}
+
+function requiredField(label) {
+  return {
+    index: 0,
+    label,
+    tag: 'input',
+    type: 'text',
+    required: true,
+    filled: false,
+    disabled: false,
+    readonly: false,
+    invalid: false,
+  }
+}
+
+function filledField(label, value) {
+  return {
+    ...requiredField(label),
+    value,
+    filled: true,
   }
 }
 

@@ -65,7 +65,7 @@ const directSubmitReview = transitionWorkflowState({
   page: page({
     url: 'https://example.test/apply/direct',
     title: 'Direct apply',
-    textSummary: '我已阅读并同意申请工作需知。投递简历',
+    textSummary: '我已阅读并同意申请工作需知。确认投递',
     inputCount: 1,
     buttonCount: 1,
   }),
@@ -74,13 +74,35 @@ const directSubmitReview = transitionWorkflowState({
     fields: [field(0, '我已阅读并同意申请工作需知', '', false, 'checkbox')],
     missingRequired: [],
     filledFields: [],
-    submitCandidates: [{ tag: 'button', type: 'submit', text: '投递简历', risk: 'L3', visible: true }],
+    submitCandidates: [{ tag: 'button', type: 'submit', text: '确认投递', risk: 'L3', visible: true }],
   }),
   now,
 })
 assert.equal(directSubmitReview.state.phase, 'direct_submit_review')
 assert.equal(directSubmitReview.state.humanHandoffRequired, true)
 assert.match(directSubmitReview.state.blocker, /final submit/i)
+
+const applicationEntryNotice = transitionWorkflowState({
+  previous: entering.state,
+  currentUrl: 'https://example.test/apply/notice',
+  page: page({
+    url: 'https://example.test/apply/notice',
+    title: 'Apply notice',
+    textSummary: '我已阅读并同意申请工作需知。投递简历',
+    inputCount: 1,
+    buttonCount: 1,
+  }),
+  form: form({
+    url: 'https://example.test/apply/notice',
+    fields: [field(0, '我已阅读并同意申请工作需知', '', false, 'checkbox')],
+    missingRequired: [],
+    filledFields: [],
+    submitCandidates: [{ tag: 'button', type: 'button', text: '投递简历', risk: 'L3', visible: true }],
+  }),
+  now,
+})
+assert.equal(applicationEntryNotice.state.phase, 'reviewing')
+assert.notEqual(applicationEntryNotice.state.phase, 'direct_submit_review')
 
 const ready = transitionWorkflowState({
   previous: reviewing.state,

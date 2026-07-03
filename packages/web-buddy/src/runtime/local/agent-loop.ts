@@ -1,4 +1,5 @@
 import { browserSnapshot } from '../../browser/snapshot.js'
+import { browserFormSnapshot } from '../../browser/form-snapshot.js'
 import {
   buildLoopContext,
   renderInitialUserContext,
@@ -12,7 +13,7 @@ import {
   type ContextCompactionResult,
 } from '../../context/compaction.js'
 import { COMPACTED_RUN_CONTEXT_PREFIX } from '../../context/run-summary.js'
-import type { ContextRecentAction } from '../../context/types.js'
+import type { ContextRecentAction, ContextSnapshot } from '../../context/types.js'
 import { estimateTokenBudget, type TokenBudgetOptions, type TokenBudgetSnapshot } from '../../kernel/token-budget.js'
 import { ApprovalQueue } from '../../permission/approval-queue.js'
 import { PermissionEngine } from '../../permission/permission-engine.js'
@@ -192,6 +193,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   const permissionRequests: PermissionRequest[] = []
   const permissionDecisions: PermissionDecision[] = []
   const approvals: ApprovalRequest[] = []
+  let workflowHandoffAttempt = 0
   const riskDecisions = createRiskDecisionsArtifact({
     runId: ctx.trace.runId,
     sessionId: ctx.trace.agentTrace?.sessionId ?? ctx.sessionId,
@@ -544,10 +546,11 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     })
     return resolved
   }
-  const recordWorkflowHandoffPermission = async (state: WorkflowState, currentStep: number, reason: string) => {
+  const recordWorkflowHandoffPermission = async (state: WorkflowState, currentStep: number, reason: string): Promise<GateDecision | undefined> => {
     const handoffKind = workflowHandoffKind(state)
-    if (!handoffKind) return
-    const turnId = turnIdForStep(currentStep)
+    if (!handoffKind) return undefined
+    workflowHandoffAttempt += 1
+    const turnId = `${turnIdForStep(currentStep)}_handoff_${workflowHandoffAttempt}`
     const request = createWorkflowHandoffPermissionRequest({
       handoffKind,
       reason,
@@ -559,7 +562,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       currentUrl: sessionManager.get(ctx.sessionId)?.page.url(),
     })
     const decision = await decidePermission(request, currentStep)
-    if (decision.action !== 'ask') return
+    if (decision.action !== 'ask') return undefined
 
     const approval = await enqueueApproval(request, decision, currentStep)
     await sessionEvent({
@@ -582,18 +585,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       url: request.currentUrl,
       risk: request.risk,
       observation: decision.reason,
-      status: 'blocked',
+      status: gateDecision === 'approve' ? 'ok' : 'blocked',
     })
-    await evaluateWorkflow(currentStep, `Workflow handoff ${handoffKind} resolved ${gateDecision}.`, {
-      turnId,
-      currentUrl: request.currentUrl,
-      permissionRequest: request,
-      permissionDecision: decision,
-      approval: resolvedApproval,
-      approvalResolution: resolvedApproval.resolution,
-      gateKind: handoffKind,
-      gateDecision,
-    })
+    return gateDecision
   }
   const finalizeSession = async (
     status: Extract<AgentSessionStatus, 'completed' | 'blocked' | 'failed' | 'aborted'>,
@@ -666,6 +660,91 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   }
 
   let latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
+  const refreshLatestContextForAgentDone = async (currentStep: number): Promise<ContextSnapshot> => {
+    const page = sessionManager.get(ctx.sessionId)?.page
+    await page?.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
+    await browserSnapshot({ sessionId: ctx.sessionId }).catch(() => undefined)
+    await browserFormSnapshot({ sessionId: ctx.sessionId }).catch(() => undefined)
+    latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
+    ctx.trace.record({
+      phase: 'agent_loop',
+      action: 'Refreshed page and form state before evaluating agent_done.',
+      url: page?.url(),
+      status: 'ok',
+    })
+    await sessionEvent({
+      type: 'workflow_updated',
+      turnId: turnIdForStep(currentStep),
+      message: 'Refreshed page and form state before agent_done.',
+      data: {
+        url: page?.url(),
+        pageType: latestContext.page?.pageType,
+        missingRequiredCount: latestContext.form?.missingRequired.length ?? 0,
+        uploadHintCount: latestContext.form?.uploadHints?.length ?? 0,
+      },
+    })
+    return latestContext
+  }
+  const refreshWorkflowAfterApprovedHandoff = async (
+    currentStep: number,
+    handoffKind: Extract<GateKind, 'login' | 'captcha'>,
+  ): Promise<string | undefined> => {
+    const page = sessionManager.get(ctx.sessionId)?.page
+    await page?.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {})
+    const snap = await browserSnapshot({ sessionId: ctx.sessionId })
+    if (snap.ok) {
+      ctx.trace.record({
+        phase: 'agent_loop',
+        action: `Refreshed browser snapshot after ${handoffKind} hand-off.`,
+        url: page?.url(),
+        status: 'ok',
+      })
+    }
+    latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
+    const contextWorkflow = await evaluateWorkflow(currentStep, `Workflow handoff ${handoffKind} approved; refreshed page state.`, {
+      currentUrl: page?.url(),
+      page: latestContext.page,
+      form: latestContext.form,
+    })
+    if (contextWorkflow.changed) {
+      latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
+    }
+    return workflowHandoffSummary(workflowState)
+  }
+  const resolveResumableWorkflowHandoff = async (
+    currentStep: number,
+    initialSummary: string,
+  ): Promise<{ resumed: boolean; summary: string }> => {
+    let summary = initialSummary
+    let handoffKind = workflowHandoffKind(workflowState)
+    if (!handoffKind) return { resumed: false, summary }
+
+    while (handoffKind) {
+      const gateDecision = await recordWorkflowHandoffPermission(workflowState, currentStep, summary)
+      if (gateDecision !== 'approve') return { resumed: false, summary }
+
+      rememberRecentAction(recentActions, {
+        step: currentStep,
+        toolName: 'workflow_handoff',
+        argumentsSummary: `gate=${handoffKind}`,
+        status: 'ok',
+        risk: 'L4',
+        observation: `Human approved ${handoffKind} handoff; refreshing page state before continuing.`,
+      })
+      emit('gate', `Human ${handoffKind} hand-off approved; refreshing the page state before continuing.`, currentStep)
+
+      const refreshedSummary = await refreshWorkflowAfterApprovedHandoff(currentStep, handoffKind)
+      if (!refreshedSummary) return { resumed: true, summary }
+
+      const refreshedKind = workflowHandoffKind(workflowState)
+      if (!refreshedKind) return { resumed: false, summary: refreshedSummary }
+      summary = refreshedSummary
+      handoffKind = refreshedKind
+      emit('gate', `${summary} Finish it in the browser, then approve again; choose decline/takeover to stop.`, currentStep)
+    }
+
+    return { resumed: false, summary }
+  }
   const initialWorkflow = await evaluateWorkflow(step, 'Initial workflow snapshot.', {
     currentUrl: sessionManager.get(ctx.sessionId)?.page.url(),
     page: latestContext.page,
@@ -676,11 +755,14 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   }
   const initialHandoffSummary = workflowHandoffSummary(workflowState)
   if (initialHandoffSummary) {
-    await recordWorkflowHandoffPermission(workflowState, step, initialHandoffSummary)
-    emit('done', initialHandoffSummary, step)
-    ctx.trace.record({ phase: 'agent_loop', action: initialHandoffSummary, status: 'blocked' })
-    await finalizeSession('blocked', { steps: step, toolCalls, summary: initialHandoffSummary, workflowState }, initialHandoffSummary)
-    return { steps: step, toolCalls, done: true, blocked: true, summary: initialHandoffSummary, workflowState }
+    const handoff = await resolveResumableWorkflowHandoff(step, initialHandoffSummary)
+    if (!handoff.resumed) {
+      emit('done', handoff.summary, step)
+      ctx.trace.record({ phase: 'agent_loop', action: handoff.summary, status: 'blocked' })
+      await finalizeSession('blocked', { steps: step, toolCalls, summary: handoff.summary, workflowState }, handoff.summary)
+      return { steps: step, toolCalls, done: true, blocked: true, summary: handoff.summary, workflowState }
+    }
+    firstView = ''
   }
   let messages: ChatMessage[] = [
     { role: 'system', content: renderSystemContext(latestContext) },
@@ -806,8 +888,39 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     if (completion.toolCalls.length === 0) {
       summary = completion.content.trim() || 'model produced no further tool calls'
       done = true
+      if (safetyMode !== 'raw' && isFinalSubmitBoundaryActive(workflowState, lastWorkflowEvaluation)) {
+        const completionGateDecision = completionGate.evaluate({
+          done,
+          blocked: false,
+          summary,
+          workflowState,
+          workflowEvaluation: lastWorkflowEvaluation,
+          page: latestContext.page,
+          form: latestContext.form,
+          source: 'model_no_tool_calls',
+        })
+        await recordCompletionGateDecision(completionGateDecision, step)
+        if (completionGateDecision.action === 'block') {
+          blocked = true
+          summary = completionGateDecision.reason
+          const completionGateBlockSummary = completionGateBlockerSummary(completionGateDecision)
+          rememberUniqueBlocker(blockers, completionGateBlockSummary)
+          emit('gate', completionGateBlockSummary, step)
+          ctx.trace.record({
+            phase: 'agent_loop',
+            action: completionGateBlockSummary,
+            url: sessionManager.get(ctx.sessionId)?.page.url(),
+            status: 'blocked',
+            observation: completionGateDecision.reason.slice(0, 300),
+          })
+        }
+      }
       emit('done', `Loop ended (no tool calls). ${summary.slice(0, 160)}`, step)
-      ctx.trace.record({ phase: 'agent_loop', action: `Loop ended: ${summary.slice(0, 200)}`, status: 'ok' })
+      ctx.trace.record({
+        phase: 'agent_loop',
+        action: `Loop ended: ${summary.slice(0, 200)}`,
+        status: blocked ? 'blocked' : 'ok',
+      })
       await sessionEvent({ type: 'turn_completed', turnId, message: `Turn ${step} completed.`, data: { done, blocked } })
       break
     }
@@ -847,6 +960,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         data: { name: call.name, risk, argBrief },
       })
       const refLabel = call.name === 'browser_click' ? labelForClick(call.arguments, ctx) : undefined
+      const contextText = actionIntentContextText(latestContext)
       const policyDecision = decideToolPolicy({
         toolName: call.name,
         args: call.arguments,
@@ -854,6 +968,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         safetyMode,
         currentUrl,
         refLabel,
+        contextText,
         freshness: latestContext.freshness,
         workflowState,
       })
@@ -928,6 +1043,21 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           risk,
           observation,
         })
+        if (isRefreshableStaleContextDeny(policyDecision, permissionDecision)) {
+          emit('gate', `[permission:deny] ${call.name}(${argBrief}); refresh page/form state before retrying.`, step)
+          await evaluateWorkflow(step, `Permission denied ${call.name}; context refresh required.`, {
+            turnId,
+            toolCallId: call.id,
+            currentUrl,
+            page: latestContext.page,
+            form: latestContext.form,
+            policyDecision,
+            permissionRequest,
+            permissionDecision,
+            gateKind: permissionDecision.gateKind ?? policyDecision.gateKind,
+          })
+          continue
+        }
         blocked = true
         done = true
         summary = policyDecision.action === 'block'
@@ -1005,22 +1135,23 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         })
         emit('gate', `[${kind}] ${call.name}(${argBrief}) → ${decision}`, step)
         if (kind === 'final_submit') {
-          const note = `BLOCKED by final-submit safety gate (${decision}). Do not retry this action; call agent_done and hand the final submission to the human.`
+          const note = decision === 'approve'
+            ? 'FINAL_SUBMIT_NOT_EXECUTED_AUTOMATICALLY. The human approved awareness of this final-submit step, but the runtime will not click a true final-submit control. If this is actually an application-entry or review-step action, inspect the page and choose the correct non-final control; otherwise ask the human to complete the final submit manually, then continue observing or call agent_done.'
+            : `FINAL_SUBMIT_NOT_EXECUTED_AUTOMATICALLY. The human chose ${decision} for this final-submit step. Do not retry this exact final-submit action; continue with any remaining safe checks or call agent_done if no safe work remains.`
           const observation = noteWithPermission(note, policyDecision, permissionDecision)
           messages.push(toolMessage(call.id, observation))
-          blockers.push(`final_submit gate stopped ${call.name}(${argBrief}) with decision=${decision}: ${permissionDecision.reason}`)
+          if (decision !== 'approve') {
+            blockers.push(`final_submit gate did not execute ${call.name}(${argBrief}) with decision=${decision}: ${permissionDecision.reason}`)
+          }
           rememberRecentAction(recentActions, {
             step,
             toolName: call.name,
             argumentsSummary: argBrief,
-            status: 'blocked',
+            status: decision === 'approve' ? 'warn' : 'blocked',
             risk,
             observation,
           })
-          blocked = true
-          done = true
-          summary = `Final submit requires manual takeover (gate: ${decision}).`
-          await evaluateWorkflow(step, `Final-submit gate stopped ${call.name}.`, {
+          await evaluateWorkflow(step, `Final-submit gate returned control to the agent without executing ${call.name}.`, {
             turnId,
             toolCallId: call.id,
             currentUrl,
@@ -1033,9 +1164,15 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             approvalResolution: resolvedApproval.resolution,
             gateKind: kind,
             gateDecision: decision,
-            agentDoneBlocked: true,
+            ...(decision !== 'approve' ? { agentDoneBlocked: true } : {}),
           })
-          break
+          if (decision !== 'approve') {
+            blocked = true
+            done = true
+            summary = `Human ${decision} the final_submit step.`
+            break
+          }
+          continue
         }
         if (decision !== 'approve') {
           const note = `BLOCKED by human gate (${decision}). Do not retry this action; call agent_done if you cannot proceed.`
@@ -1079,11 +1216,13 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       const abortedBeforeExecution = await checkAbort(turnId)
       if (abortedBeforeExecution) return abortedBeforeExecution
 
+      let preAgentDoneWorkflowEvaluation: WorkflowEngineEvaluation | undefined
       if (call.name === 'agent_done') {
-        await evaluateWorkflow(step, 'Before agent_done.', {
+        await refreshLatestContextForAgentDone(step)
+        preAgentDoneWorkflowEvaluation = await evaluateWorkflow(step, 'Before agent_done.', {
           turnId,
           toolCallId: call.id,
-          currentUrl,
+          currentUrl: sessionManager.get(ctx.sessionId)?.page.url(),
           page: latestContext.page,
           form: latestContext.form,
           toolName: call.name,
@@ -1225,34 +1364,26 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       }
       let completionGateDecision: CompletionGateDecision | undefined
       let completionGateBlockSummary: string | undefined
-      const workflowEvaluation = await evaluateWorkflow(step, `${call.name} updated workflow state.`, {
-        turnId,
-        toolCallId: call.id,
-        currentUrl: sessionManager.get(ctx.sessionId)?.page.url(),
-        page: latestContext.page,
-        form: latestContext.form,
-        toolName: call.name,
-        toolResult: result,
-        policyDecision,
-        permissionRequest,
-        permissionDecision,
-        ...(result.done ? { agentDoneBlocked: blocked } : {}),
-      })
-      if (call.name === 'agent_done' && result.done) {
-        completionGateDecision = completionGate.evaluate({
+      let rejectedPrematureAgentDone = false
+      if (call.name === 'agent_done' && result.done && call.arguments.blocked === true) {
+        const preAgentDoneGateDecision = completionGate.evaluate({
           done,
           blocked,
           summary,
-          workflowState,
-          workflowEvaluation,
+          workflowState: preAgentDoneWorkflowEvaluation?.state ?? workflowState,
+          workflowEvaluation: preAgentDoneWorkflowEvaluation,
+          page: latestContext.page,
+          form: latestContext.form,
           source: 'agent_done',
         })
-        await recordCompletionGateDecision(completionGateDecision, step, { toolCallId: call.id })
 
-        if (completionGateDecision.action === 'block') {
-          done = true
-          blocked = true
-          summary = completionGateDecision.reason
+        if (preAgentDoneGateDecision.action === 'reject') {
+          completionGateDecision = preAgentDoneGateDecision
+          await recordCompletionGateDecision(completionGateDecision, step, { toolCallId: call.id })
+          rejectedPrematureAgentDone = true
+          done = false
+          blocked = false
+          summary = 'no summary'
           completionGateBlockSummary = completionGateBlockerSummary(completionGateDecision)
           rememberUniqueBlocker(blockers, completionGateBlockSummary)
           emit('gate', completionGateBlockSummary, step)
@@ -1260,28 +1391,79 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             phase: 'agent_loop',
             action: completionGateBlockSummary,
             url: sessionManager.get(ctx.sessionId)?.page.url(),
-            status: 'blocked',
+            status: 'warn',
             observation: completionGateDecision.reason.slice(0, 300),
           })
-        } else if (completionGateDecision.action === 'allow') {
-          done = true
-          blocked = false
+          result = {
+            observation: completionGateDecision.reason,
+            done: false,
+            data: { blocked: false, completionGateAction: 'reject' },
+            pageChanged: false,
+          }
+        }
+      }
+
+      if (!rejectedPrematureAgentDone) {
+        const workflowEvaluation = await evaluateWorkflow(step, `${call.name} updated workflow state.`, {
+          turnId,
+          toolCallId: call.id,
+          currentUrl: sessionManager.get(ctx.sessionId)?.page.url(),
+          page: latestContext.page,
+          form: latestContext.form,
+          toolName: call.name,
+          toolResult: result,
+          policyDecision,
+          permissionRequest,
+          permissionDecision,
+          ...(result.done ? { agentDoneBlocked: blocked } : {}),
+        })
+        if (call.name === 'agent_done' && result.done) {
+          completionGateDecision = completionGate.evaluate({
+            done,
+            blocked,
+            summary,
+            workflowState,
+            workflowEvaluation,
+            page: latestContext.page,
+            form: latestContext.form,
+            source: 'agent_done',
+          })
+          await recordCompletionGateDecision(completionGateDecision, step, { toolCallId: call.id })
+
+          if (completionGateDecision.action === 'block') {
+            done = true
+            blocked = true
+            summary = completionGateDecision.reason
+            completionGateBlockSummary = completionGateBlockerSummary(completionGateDecision)
+            rememberUniqueBlocker(blockers, completionGateBlockSummary)
+            emit('gate', completionGateBlockSummary, step)
+            ctx.trace.record({
+              phase: 'agent_loop',
+              action: completionGateBlockSummary,
+              url: sessionManager.get(ctx.sessionId)?.page.url(),
+              status: 'blocked',
+              observation: completionGateDecision.reason.slice(0, 300),
+            })
+          } else if (completionGateDecision.action === 'allow') {
+            done = true
+            blocked = false
+          }
         }
       }
       rememberRecentAction(recentActions, {
         step,
         toolName: call.name,
         argumentsSummary: argBrief,
-        status: !toolOk ? 'warn' : blocked && result.done ? 'blocked' : 'ok',
+        status: !toolOk || rejectedPrematureAgentDone ? 'warn' : blocked && result.done ? 'blocked' : 'ok',
         risk,
         observation: result.observation,
       })
-      if (completionGateDecision?.action === 'block') {
+      if (completionGateDecision?.action === 'block' || completionGateDecision?.action === 'reject') {
         rememberRecentAction(recentActions, {
           step,
           toolName: 'completion_gate',
           argumentsSummary: completionGateDecision.action,
-          status: 'blocked',
+          status: completionGateDecision.action === 'reject' ? 'warn' : 'blocked',
           observation: completionGateBlockSummary ?? completionGateDecision.reason,
         })
       }
@@ -1310,22 +1492,24 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       }
       const handoffSummary = workflowHandoffSummary(workflowState)
       if (handoffSummary) {
-        done = true
-        blocked = true
-        summary = handoffSummary
-        blockers.push(handoffSummary)
-        rememberRecentAction(recentActions, {
-          step,
-          toolName: 'workflow_state',
-          argumentsSummary: `phase=${workflowState.phase}`,
-          status: 'blocked',
-          observation: handoffSummary,
-        })
-        emit('done', handoffSummary, step)
-        ctx.trace.record({ phase: 'agent_loop', action: handoffSummary, status: 'blocked' })
-        await recordWorkflowSnapshot(workflowState, step, handoffSummary)
-        await recordWorkflowHandoffPermission(workflowState, step, handoffSummary)
-        break
+        const handoff = await resolveResumableWorkflowHandoff(step, handoffSummary)
+        if (!handoff.resumed) {
+          done = true
+          blocked = true
+          summary = handoff.summary
+          blockers.push(handoff.summary)
+          rememberRecentAction(recentActions, {
+            step,
+            toolName: 'workflow_state',
+            argumentsSummary: `phase=${workflowState.phase}`,
+            status: 'blocked',
+            observation: handoff.summary,
+          })
+          emit('done', handoff.summary, step)
+          ctx.trace.record({ phase: 'agent_loop', action: handoff.summary, status: 'blocked' })
+          await recordWorkflowSnapshot(workflowState, step, handoff.summary)
+          break
+        }
       }
       messages.push({ role: 'user', content: `UPDATED_CONTEXT\n${renderUserContext(latestContext)}` })
     }
@@ -1452,6 +1636,18 @@ function workflowEvaluationForCompaction(
   }
 }
 
+function isFinalSubmitBoundaryActive(
+  workflowState: WorkflowState,
+  evaluation: WorkflowEngineEvaluation | undefined,
+): boolean {
+  if (workflowState.phase === 'direct_submit_review' || workflowState.phase === 'ready_for_final_submit') return true
+  if (/final[-_\s]?submit|final submission|manual takeover/i.test(workflowState.blocker ?? '')) return true
+  return evaluation?.blockers.some((blocker) => (
+    blocker.gateKind === 'final_submit' ||
+    /final[-_\s]?submit|final submission|manual takeover/i.test(blocker.message)
+  )) === true
+}
+
 function buildLoopContextWithWorkflow(
   input: AgentLoopInput,
   workflowState: WorkflowState,
@@ -1511,6 +1707,23 @@ function labelForClick(args: Record<string, unknown>, ctx: ToolContext): string 
   return [stored?.name, stored?.text].filter(Boolean).join(' ')
 }
 
+function actionIntentContextText(snapshot: ContextSnapshot): string {
+  const lines = [
+    snapshot.page?.title,
+    snapshot.page?.pageType,
+    snapshot.page?.textSummary,
+    ...(snapshot.form?.submitCandidates ?? []).map((candidate) => candidate.text),
+    ...(snapshot.form?.uploadHints ?? []).map((hint) => hint.text),
+    ...(snapshot.form?.visibleErrors ?? []),
+  ]
+  return lines
+    .filter((line): line is string => typeof line === 'string' && line.trim().length > 0)
+    .join('\n')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 1800)
+}
+
 function markConfirmed(call: { name: string; arguments: Record<string, unknown> }): void {
   if (call.name === 'browser_click' || call.name === 'browser_click_text' || call.name === 'browser_upload_file') {
     call.arguments.confirmed = true
@@ -1525,12 +1738,19 @@ function noteWithPermission(note: string, policy: PolicyEngineDecision, permissi
   ].join('\n')
 }
 
+function isRefreshableStaleContextDeny(policy: PolicyEngineDecision, permission: PermissionDecision): boolean {
+  if (permission.action !== 'deny') return false
+  const reason = `${policy.reason} ${permission.reason}`
+  return /stale|Refresh page\/form state|Context appears stale/i.test(reason)
+}
+
 function policyMetadata(decision: PolicyEngineDecision): Record<string, unknown> {
   return {
     schemaVersion: decision.schemaVersion,
     action: decision.action,
     riskLevel: decision.riskLevel,
     gateKind: decision.gateKind,
+    actionIntent: decision.actionIntent,
     requiresFreshContext: decision.requiresFreshContext,
     policyCode: decision.policyCode,
     ruleId: decision.ruleId,
@@ -1615,20 +1835,21 @@ function completionGateDecisionMetadata(decision: CompletionGateDecision): Recor
 }
 
 function completionGateBlockerSummary(decision: CompletionGateDecision): string {
+  const prefix = decision.action === 'reject' ? 'completion_gate rejected' : 'completion_gate blocked'
   const firstMissing = decision.missingCriteria[0]
   if (firstMissing) {
     const missingKinds = firstMissing.missingEvidenceKinds.length > 0
       ? ` missing ${firstMissing.missingEvidenceKinds.join(', ')}`
       : ''
-    return `completion_gate blocked: ${firstMissing.id}${missingKinds}`
+    return `${prefix}: ${firstMissing.id}${missingKinds}`
   }
 
   const firstBlocker = decision.blockers[0]
   if (firstBlocker) {
-    return `completion_gate blocked: ${truncateForWorkflowEvidence(firstBlocker.message, 180)}`
+    return `${prefix}: ${truncateForWorkflowEvidence(firstBlocker.message, 180)}`
   }
 
-  return `completion_gate blocked: ${truncateForWorkflowEvidence(decision.reason, 180)}`
+  return `${prefix}: ${truncateForWorkflowEvidence(decision.reason, 180)}`
 }
 
 function approvalInputFor(request: PermissionRequest, decision: PermissionDecision): ApprovalEnqueueInput {
@@ -1837,6 +2058,7 @@ function workflowPageEvidenceData(page: NonNullable<WorkflowEngineInput['page']>
     buttonCount: page.buttonCount,
     inputCount: page.inputCount,
     textSummary: truncateForWorkflowEvidence(page.textSummary),
+    ...(page.facts ? { facts: page.facts } : {}),
     updatedAt: page.updatedAt,
   }
 }
@@ -1854,6 +2076,7 @@ function workflowFormEvidenceData(form: NonNullable<WorkflowEngineInput['form']>
     submitCandidateCount: form.submitCandidates.length,
     uploadHintCount: form.uploadHints?.length ?? 0,
     visibleErrorCount: form.visibleErrors?.length ?? 0,
+    ...(form.facts ? { facts: form.facts } : {}),
     updatedAt: form.updatedAt,
   }
 }

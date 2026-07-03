@@ -2,6 +2,7 @@ import { toolFailure, toolSuccess } from '../errors.js'
 import { observationManager } from '../observation/observation-manager.js'
 import { buildSnapshot } from '../snapshot/builder.js'
 import { sessionManager } from '../session/manager.js'
+import { collectPageFacts } from './page-facts.js'
 
 export async function browserSnapshot(input: {
   sessionId?: string
@@ -17,6 +18,8 @@ export async function browserSnapshot(input: {
 
   try {
     const record = await buildSnapshot(session.page, { maxElements: input.maxElements })
+    const facts = await collectPageFacts(session.page).catch(() => undefined)
+    if (facts) record.snapshot.facts = facts
     sessionManager.setSnapshot(session.id, record)
 
     const { snapshot } = record

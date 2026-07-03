@@ -26,6 +26,9 @@ export function pageView(snapshot: PageSnapshot | undefined | null, maxElements 
       : snapshot.textSummary
     lines.push(`Page text: ${t.replace(/\n/g, ' ')}`)
   }
+  if (snapshot.facts) {
+    lines.push(`Facts: ${renderFactsLine(snapshot.facts)}`)
+  }
   lines.push('')
   lines.push(`Interactive elements — reference these by their [ref] id (risk L3/L4 need confirmation):`)
 
@@ -42,6 +45,32 @@ export function pageView(snapshot: PageSnapshot | undefined | null, maxElements 
     lines.push(`  … (${snapshot.stats.elementCount} interactive elements total; ${els.length} shown)`)
   }
   return lines.join('\n')
+}
+
+function renderFactsLine(facts: PageSnapshot['facts']): string {
+  if (!facts) return '(none)'
+  const parts = [
+    `agreementCheckbox=${facts.hasAgreementCheckbox}`,
+    `agreementChecked=${facts.agreementChecked}`,
+    `quotaDialog=${facts.hasApplicationQuotaDialog}`,
+    facts.quotaDialogText ? `quotaText="${truncate(facts.quotaDialogText, 100)}"` : '',
+    `realUploadInput=${facts.hasRealUploadInput}`,
+    `uploadCandidates=${facts.uploadCandidateCount}`,
+    facts.visibleBlockingDialog.present
+      ? `blockingDialog=${facts.visibleBlockingDialog.kind || 'unknown'} "${truncate(facts.visibleBlockingDialog.text || '', 100)}"`
+      : 'blockingDialog=false',
+    facts.likelyApplyEntryButtons.length
+      ? `applyEntryButtons=[${facts.likelyApplyEntryButtons.map((button) => truncate(button.text, 40)).join(', ')}]`
+      : '',
+    facts.likelyFinalSubmitButtons.length
+      ? `finalSubmitButtons=[${facts.likelyFinalSubmitButtons.map((button) => truncate(button.text, 40)).join(', ')}]`
+      : '',
+  ].filter(Boolean)
+  return parts.join('; ')
+}
+
+function truncate(value: string, max: number): string {
+  return value.length <= max ? value : `${value.slice(0, max)}…`
 }
 
 /** Short one-line summary of the latest snapshot, for trace/logs. */

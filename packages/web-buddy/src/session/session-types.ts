@@ -103,6 +103,12 @@ export interface WorkflowSnapshotEntry extends TranscriptEntryBase {
   workflowState: unknown
 }
 
+export interface MemorySnapshotEntry extends TranscriptEntryBase {
+  type: 'memory_snapshot'
+  memory: unknown
+  reason?: string
+}
+
 export interface WorkflowEvidenceEntry extends TranscriptEntryBase {
   type: 'workflow_evidence'
   evidence: unknown
@@ -164,6 +170,7 @@ export type TranscriptEntry =
   | ApprovalRequestEntry
   | ApprovalDecisionEntry
   | WorkflowSnapshotEntry
+  | MemorySnapshotEntry
   | WorkflowEvidenceEntry
   | UserConfirmationEntry
   | UserAnswerEntry

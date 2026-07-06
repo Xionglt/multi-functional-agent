@@ -4,6 +4,7 @@ import type { PageState } from '../observation/page-state.js'
 import { createDefaultTaskState, type TaskState } from '../task/task-state.js'
 import type { WorkflowState } from '../workflow/workflow-state.js'
 import { normalizeLines, oneLine, truncateText } from './budget.js'
+import { renderRunMemory } from './run-memory.js'
 import type { ContextFreshness, ContextRecentAction, ContextSnapshot, PromptSection, PromptSectionId } from './types.js'
 
 export const PROMPT_SECTION_ORDER: PromptSectionId[] = [
@@ -12,6 +13,7 @@ export const PROMPT_SECTION_ORDER: PromptSectionId[] = [
   'TASK',
   'TASK_STATE',
   'WORKFLOW_STATE',
+  'RUN_MEMORY',
   'RESUME_SUMMARY',
   'CURRENT_PAGE_STATE',
   'CURRENT_FORM_STATE',
@@ -36,6 +38,7 @@ const DEFAULT_SECTION_MAX_CHARS: Record<PromptSectionId, number> = {
   TASK: 1400,
   TASK_STATE: 900,
   WORKFLOW_STATE: 900,
+  RUN_MEMORY: 1400,
   RESUME_SUMMARY: 2200,
   CURRENT_PAGE_STATE: 1800,
   CURRENT_FORM_STATE: 2800,
@@ -50,6 +53,7 @@ const SECTION_TITLES: Record<PromptSectionId, string> = {
   TASK: 'TASK',
   TASK_STATE: 'TASK_STATE',
   WORKFLOW_STATE: 'WORKFLOW_STATE',
+  RUN_MEMORY: 'RUN_MEMORY',
   RESUME_SUMMARY: 'RESUME_SUMMARY',
   CURRENT_PAGE_STATE: 'CURRENT_PAGE_STATE',
   CURRENT_FORM_STATE: 'CURRENT_FORM_STATE',
@@ -111,6 +115,8 @@ function renderSectionContent(id: PromptSectionId, snapshot: ContextSnapshot): s
       }))
     case 'WORKFLOW_STATE':
       return renderWorkflowState(snapshot.workflowState)
+    case 'RUN_MEMORY':
+      return renderRunMemory(snapshot.runMemory)
     case 'RESUME_SUMMARY':
       return snapshot.resumeSummary || '(no resume summary provided)'
     case 'CURRENT_PAGE_STATE':
@@ -130,6 +136,7 @@ function renderSectionContent(id: PromptSectionId, snapshot: ContextSnapshot): s
         'When FILL_PLAN has a fillable intendedValue, write it into the matching field first; prefer browser_set_field when available, otherwise use browser_fill_by_label, browser_type, browser_select, or browser_select_by_text as appropriate.',
         'If a field lacks resume details beyond RESUME_SUMMARY, call resume_query for the relevant full resume section before leaving it blank.',
         'If a field needs information that is not in the resume and cannot be inferred from the page, call ask_user with the planned question before filling it.',
+        'Use RUN_MEMORY to avoid repeating empty searches and to preserve promising or excluded job candidates across turns.',
         'Do not call agent_done while FillLedger shows pendingRequired fields unless you are blocked and explain exactly which required fields remain.',
         'Follow SAFETY_RULES before any click, submit-like action, credential flow, captcha, payment, or identity-proof step.',
         'Call agent_done when the task is complete or blocked.',

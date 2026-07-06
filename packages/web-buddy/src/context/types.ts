@@ -5,6 +5,7 @@ import type { TaskState } from '../task/task-state.js'
 import type { FieldPlan } from '../fill/field-plan.js'
 import type { FillLedgerSummary } from '../fill/fill-ledger.js'
 import type { WorkflowState } from '../workflow/workflow-state.js'
+import type { RunMemory } from './run-memory.js'
 
 export type MaybePromise<T> = T | Promise<T>
 
@@ -43,6 +44,7 @@ export interface ContextSnapshot {
   form?: FormState
   taskState?: TaskState
   workflowState?: WorkflowState
+  runMemory?: RunMemory
   fieldPlan?: FieldPlan
   fillLedgerSummary?: FillLedgerSummary
   answerSummary?: string
@@ -65,6 +67,7 @@ export interface ContextSnapshotInput {
   extraContext?: string
   taskState?: TaskState
   workflowState?: WorkflowState
+  runMemory?: RunMemory
   fieldPlan?: FieldPlan
   fillLedgerSummary?: FillLedgerSummary
   answerSummary?: string
@@ -77,6 +80,7 @@ export type PromptSectionId =
   | 'TASK'
   | 'TASK_STATE'
   | 'WORKFLOW_STATE'
+  | 'RUN_MEMORY'
   | 'RESUME_SUMMARY'
   | 'CURRENT_PAGE_STATE'
   | 'CURRENT_FORM_STATE'

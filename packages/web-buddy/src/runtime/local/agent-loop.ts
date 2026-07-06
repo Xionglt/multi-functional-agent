@@ -13,6 +13,13 @@ import {
   type ContextCompactionResult,
 } from '../../context/compaction.js'
 import { COMPACTED_RUN_CONTEXT_PREFIX } from '../../context/run-summary.js'
+import {
+  compactRunMemory,
+  createRunMemory,
+  updateRunMemoryFromModel,
+  updateRunMemoryFromTool,
+  type RunMemory,
+} from '../../context/run-memory.js'
 import type { ContextRecentAction, ContextSnapshot } from '../../context/types.js'
 import { AnswerStore, type UserAnswer } from '../../context/answer-store.js'
 import { ProfileStore } from '../../context/profile-store.js'
@@ -229,6 +236,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   const permissionRequests: PermissionRequest[] = []
   const permissionDecisions: PermissionDecision[] = []
   const approvals: ApprovalRequest[] = []
+  const runMemory = createRunMemory()
   let workflowHandoffAttempt = 0
   const riskDecisions = createRiskDecisionsArtifact({
     runId: ctx.trace.runId,
@@ -262,6 +270,28 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     sessionAction('workflow', () => session!.workflow(state))
   const sessionStatus = async (status: AgentSessionStatus, patch?: Parameters<SessionRecorder['updateStatus']>[1]) =>
     sessionAction('status', () => session!.updateStatus(status, patch))
+  const recordRunMemorySnapshot = async (reason: string, currentStep: number, turnId?: string, toolCallId?: string) => {
+    const memory = compactRunMemory(runMemory)
+    ctx.trace.agentTrace?.recordEvent('memory_updated', {
+      step: currentStep,
+      reason,
+      memory,
+      ...(toolCallId ? { toolCallId } : {}),
+    })
+    await sessionTranscript({
+      type: 'memory_snapshot',
+      ...(turnId ? { turnId } : {}),
+      memory,
+      reason,
+    })
+    await sessionEvent({
+      type: 'memory_updated',
+      ...(turnId ? { turnId } : {}),
+      ...(toolCallId ? { toolCallId } : {}),
+      message: reason,
+      data: { memory },
+    })
+  }
   const syncFillLedgerSummary = (snapshot?: ContextSnapshot): FillLedgerSummary => {
     const summary = fillLedger.summary()
     ctx.fillLedgerSummary = summary
@@ -286,7 +316,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       llm,
       sourceFormUrl: snapshot.form.url,
     })
-    return buildLoopContextWithWorkflow(loopInput, workflowState, recentActions, blockers)
+    return buildLoopContextWithWorkflow(loopInput, workflowState, runMemory, recentActions, blockers)
   }
   const addWorkflowEvidence = async (
     evidenceInput: AddWorkflowEvidenceInput,
@@ -696,7 +726,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         data: { done, blocked, aborted: true },
       })
     }
-    await finalizeSession('aborted', { steps: step, toolCalls, done, blocked, summary, workflowState }, summary)
+    await finalizeSession('aborted', { steps: step, toolCalls, done, blocked, summary, workflowState, runMemory: compactRunMemory(runMemory) }, summary)
     return { steps: step, toolCalls, done, blocked, summary, workflowState }
   }
   const checkAbort = async (turnId?: string): Promise<AgentLoopResult | undefined> => {
@@ -727,14 +757,14 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     // no page yet — the model can call browser_open itself
   }
 
-  let latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, recentActions, blockers)
+  let latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, runMemory, recentActions, blockers)
   latestContext = await ensureFieldPlan(latestContext)
   const refreshLatestContextForAgentDone = async (currentStep: number): Promise<ContextSnapshot> => {
     const page = sessionManager.get(ctx.sessionId)?.page
     await page?.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
     await browserSnapshot({ sessionId: ctx.sessionId }).catch(() => undefined)
     await browserFormSnapshot({ sessionId: ctx.sessionId }).catch(() => undefined)
-    latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, recentActions, blockers)
+    latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, runMemory, recentActions, blockers)
     latestContext = await ensureFieldPlan(latestContext)
     syncFillLedgerSummary(latestContext)
     ctx.trace.record({
@@ -771,7 +801,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         status: 'ok',
       })
     }
-    latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, recentActions, blockers)
+    latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, runMemory, recentActions, blockers)
     latestContext = await ensureFieldPlan(latestContext)
     syncFillLedgerSummary(latestContext)
     const contextWorkflow = await evaluateWorkflow(currentStep, `Workflow handoff ${handoffKind} approved; refreshed page state.`, {
@@ -780,7 +810,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       form: latestContext.form,
     })
     if (contextWorkflow.changed) {
-      latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, recentActions, blockers)
+      latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, runMemory, recentActions, blockers)
       latestContext = await ensureFieldPlan(latestContext)
     }
     return workflowHandoffSummary(workflowState)
@@ -825,7 +855,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     form: latestContext.form,
   })
   if (initialWorkflow.changed) {
-    latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, recentActions, blockers)
+    latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, runMemory, recentActions, blockers)
     latestContext = await ensureFieldPlan(latestContext)
   }
   const initialHandoffSummary = workflowHandoffSummary(workflowState)
@@ -834,7 +864,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     if (!handoff.resumed) {
       emit('done', handoff.summary, step)
       ctx.trace.record({ phase: 'agent_loop', action: handoff.summary, status: 'blocked' })
-      await finalizeSession('blocked', { steps: step, toolCalls, summary: handoff.summary, workflowState }, handoff.summary)
+      await finalizeSession('blocked', { steps: step, toolCalls, summary: handoff.summary, workflowState, runMemory: compactRunMemory(runMemory) }, handoff.summary)
       return { steps: step, toolCalls, done: true, blocked: true, summary: handoff.summary, workflowState }
     }
     firstView = ''
@@ -927,7 +957,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         message,
         ...(error instanceof Error && error.stack ? { stack: error.stack } : {}),
       })
-      await finalizeSession('failed', { steps: step, toolCalls, summary: message, workflowState }, message)
+      await finalizeSession('failed', { steps: step, toolCalls, summary: message, workflowState, runMemory: compactRunMemory(runMemory) }, message)
       return {
         steps: step,
         toolCalls,
@@ -955,6 +985,13 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         toolCalls: completion.toolCalls.map((call) => ({ id: call.id, name: call.name })),
       },
     })
+    if (updateRunMemoryFromModel({
+      memory: runMemory,
+      content: completion.content,
+      toolCalls: completion.toolCalls.map((call) => ({ name: call.name, arguments: call.arguments })),
+    })) {
+      await recordRunMemorySnapshot('Run memory updated from model message.', step, turnId)
+    }
 
     if (completion.content.trim()) {
       emit('think', completion.content.replace(/\s+/g, ' ').slice(0, 200), step)
@@ -1406,13 +1443,13 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           message,
           ...(error instanceof Error && error.stack ? { stack: error.stack } : {}),
         })
-        await finalizeSession('failed', { steps: step, toolCalls, toolName: call.name, error: message, workflowState }, message)
+        await finalizeSession('failed', { steps: step, toolCalls, toolName: call.name, error: message, workflowState, runMemory: compactRunMemory(runMemory) }, message)
         throw error
       }
       const toolOk = execution?.ok ?? !result.observation.startsWith('FAILED')
       if (call.name === 'plan_form_fill' && toolOk && isFieldPlan(result.data)) {
         ctx.fieldPlan = result.data
-        latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, recentActions, blockers)
+        latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, runMemory, recentActions, blockers)
         latestContext = await ensureFieldPlan(latestContext)
         syncFillLedgerSummary(latestContext)
       }
@@ -1433,6 +1470,16 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       if (call.name === 'browser_upload_file' && toolOk) {
         currentResumeUploaded = true
         syncFillLedgerSummary(latestContext)
+      }
+      if (updateRunMemoryFromTool({
+        memory: runMemory,
+        toolName: call.name,
+        args: call.arguments,
+        result,
+        ok: toolOk,
+        currentUrl: sessionManager.get(ctx.sessionId)?.page.url(),
+      })) {
+        await recordRunMemorySnapshot(`Run memory updated from ${call.name}.`, step, turnId, call.id)
       }
       const compactResult = compactToolResult(result)
       await sessionTranscript({
@@ -1634,7 +1681,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     }
 
     if (!done) {
-      latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, recentActions, blockers)
+      latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, runMemory, recentActions, blockers)
       latestContext = await ensureFieldPlan(latestContext)
       syncFillLedgerSummary(latestContext)
       const contextWorkflow = await evaluateWorkflow(step, 'Context refresh updated workflow state.', {
@@ -1643,7 +1690,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         form: latestContext.form,
       })
       if (contextWorkflow.changed) {
-        latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, recentActions, blockers)
+        latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, runMemory, recentActions, blockers)
         latestContext = await ensureFieldPlan(latestContext)
         syncFillLedgerSummary(latestContext)
       }
@@ -1689,7 +1736,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
 
   await finalizeSession(
     done && !blocked ? 'completed' : 'blocked',
-    { steps: step, toolCalls, done, blocked, summary, workflowState },
+    { steps: step, toolCalls, done, blocked, summary, workflowState, runMemory: compactRunMemory(runMemory) },
     done && !blocked ? undefined : summary,
   )
 
@@ -1893,6 +1940,7 @@ function intendedValueFrom(value: unknown): string | string[] | null | undefined
 function buildLoopContextWithWorkflow(
   input: AgentLoopInput,
   workflowState: WorkflowState,
+  runMemory: RunMemory,
   recentActions: ContextRecentAction[],
   blockers: string[],
 ) {
@@ -1904,6 +1952,7 @@ function buildLoopContextWithWorkflow(
       extraContext: input.extraContext,
       safetyMode: input.safetyMode,
       workflowState,
+      runMemory: compactRunMemory(runMemory),
       fieldPlan: input.ctx.fieldPlan ?? input.fieldPlan,
       fillLedgerSummary: input.ctx.fillLedgerSummary ?? input.fillLedgerSummary ?? workflowState.fillLedgerSummary,
       answerSummary: summarizeAnswerStore(input.ctx.answerStore),

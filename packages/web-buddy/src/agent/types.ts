@@ -9,6 +9,7 @@ import type { ResumeProfile, ResumeProfileV2 } from '../sdk/resume.js'
 import type { SessionRecorder } from '../session/index.js'
 import type { ToolContext, ToolRegistry } from '../runtime/local/tool-registry.js'
 import type { TaskState } from '../task/task-state.js'
+import type { RunMemory } from '../context/run-memory.js'
 import type { WorkflowState } from '../workflow/workflow-state.js'
 
 export type AgentSafetyMode = 'guarded' | 'raw'
@@ -69,6 +70,7 @@ export interface PromptAssemblerInput {
   extraContext?: string
   taskState?: TaskState
   workflowState?: WorkflowState
+  runMemory?: RunMemory
   fieldPlan?: FieldPlan
   fillLedgerSummary?: FillLedgerSummary
   answerSummary?: string

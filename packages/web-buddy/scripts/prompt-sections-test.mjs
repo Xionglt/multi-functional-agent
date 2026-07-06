@@ -127,9 +127,9 @@ const sections = buildPromptSections(snapshot, {
 
 assert.deepEqual(sections.map((section) => section.id), PROMPT_SECTION_ORDER, 'prompt section order must be stable')
 assert.deepEqual(
-  PROMPT_SECTION_ORDER.slice(0, 6),
-  ['SYSTEM_ROLE', 'SAFETY_RULES', 'TASK', 'TASK_STATE', 'WORKFLOW_STATE', 'RESUME_SUMMARY'],
-  'WORKFLOW_STATE should render after TASK_STATE and before RESUME_SUMMARY',
+  PROMPT_SECTION_ORDER.slice(0, 7),
+  ['SYSTEM_ROLE', 'SAFETY_RULES', 'TASK', 'TASK_STATE', 'WORKFLOW_STATE', 'RUN_MEMORY', 'RESUME_SUMMARY'],
+  'RUN_MEMORY should render after WORKFLOW_STATE and before RESUME_SUMMARY',
 )
 assert.equal(
   PROMPT_SECTION_ORDER.indexOf('FILL_PLAN'),

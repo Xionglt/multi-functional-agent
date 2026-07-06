@@ -52,6 +52,7 @@ export class PromptAssembler {
       extraContext: input.extraContext,
       taskState: input.taskState ?? createDefaultTaskState({ goal: input.goal, updatedAt }),
       workflowState: input.workflowState,
+      runMemory: input.runMemory,
       fieldPlan: input.fieldPlan,
       fillLedgerSummary: input.fillLedgerSummary,
       answerSummary: input.answerSummary,

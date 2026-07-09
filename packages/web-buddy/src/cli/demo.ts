@@ -17,7 +17,7 @@
 import * as readline from 'node:readline/promises'
 import { stdin, stdout } from 'node:process'
 import { relative } from 'node:path'
-import { loadConfig, type AgentConfig } from '../sdk/config.js'
+import { loadConfig, type AgentConfig, type AgentConfigOverrides, type ModelConfig } from '../sdk/config.js'
 import { DEFAULT_ALIBABA_APPLY_PROMPT, runJobApplicationAgent, type AgentMode } from '../sdk/orchestrator.js'
 import { sessionManager } from '../session/manager.js'
 import { defaultAuthPath, ensureLogin } from '../runtime/local/login.js'
@@ -122,15 +122,21 @@ function applyFlags(config: AgentConfig, f: Flags): AgentConfig {
 }
 
 function loadConfigWithFlags(f: Flags): AgentConfig {
-  return applyFlags(loadConfig({
+  const model: Partial<ModelConfig> = {}
+  if (f.modelKey !== undefined) model.apiKey = f.modelKey
+  if (f.baseUrl !== undefined) model.baseUrl = f.baseUrl
+  if (f.modelName !== undefined) model.name = f.modelName
+
+  const overrides: AgentConfigOverrides = {
     resumePath: f.resume,
     alibabaCareersUrl: f.listUrl,
     maxJobsToDetail: f.maxJobs,
     maxJobPagesToCrawl: f.maxPages,
     maxJobsToCrawl: f.maxCrawlJobs,
     matchThreshold: f.matchThreshold,
-    model: { apiKey: f.modelKey, baseUrl: f.baseUrl!, name: f.modelName! },
-  }), f)
+    ...(Object.keys(model).length > 0 ? { model } : {}),
+  }
+  return applyFlags(loadConfig(overrides), f)
 }
 
 function shouldKeepBrowserOpen(f: Flags, config: AgentConfig): boolean {

@@ -139,11 +139,15 @@ async function runPermissionScenarios() {
       'permission_decision',
       'approval_request',
       'approval_decision',
+      'skill_context',
       'workflow_evidence',
       'workflow_evaluation',
       'workflow_snapshot',
       'tool_result',
     ])
+    const skillContext = approve.transcript.find((entry) => entry.type === 'skill_context')
+    assert(skillContext?.context?.skills?.length > 0, 'transcript should include resolved skill context')
+    assert(approve.events.some((event) => event.type === 'skill_resolved'), 'events should include skill_resolved')
     assert(approve.events.some((event) => event.type === 'permission_evaluated'), 'events should include permission_evaluated')
     assert(approve.events.some((event) => event.type === 'approval_requested'), 'events should include approval_requested')
     assert(approve.events.some((event) => event.type === 'approval_resolved'), 'events should include approval_resolved')
@@ -588,6 +592,7 @@ async function runCompactionScenario() {
       llm.compactedMessages.some((message) => message.role === 'user' && message.content.startsWith(COMPACTED_RUN_CONTEXT_PREFIX)),
       'compacted message set should include COMPACTED_RUN_CONTEXT',
     )
+    assertToolBoundariesIntact(llm.compactedMessages)
 
     trace.finish()
   } finally {
@@ -733,6 +738,22 @@ function seedFreshObservation(sessionId) {
       },
     },
   })
+}
+
+function assertToolBoundariesIntact(messages) {
+  const satisfiedToolCalls = new Set()
+  for (const message of messages) {
+    if (message.role === 'assistant') {
+      for (const toolCall of message.tool_calls ?? []) satisfiedToolCalls.add(toolCall.id)
+      continue
+    }
+    if (message.role === 'tool') {
+      assert(
+        satisfiedToolCalls.has(message.tool_call_id),
+        `tool result ${message.tool_call_id} must retain its assistant tool_call boundary`,
+      )
+    }
+  }
 }
 
 function element(ref, tag, name, risk) {

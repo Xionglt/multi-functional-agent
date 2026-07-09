@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runAgentLoop } from '../dist/runtime/local/agent-loop.js'
@@ -9,7 +9,12 @@ import { AutoHumanGate } from '../dist/sdk/human.js'
 import { TraceRecorder } from '../dist/sdk/trace.js'
 import { FileSessionStore, FileSessionRecorder, readJsonLines } from '../dist/session/index.js'
 
-const root = mkdtempSync(join(tmpdir(), 'mfa-tool-result-artifact-'))
+const keepOutput = process.env.KEEP_TOOL_RESULT_ARTIFACT_TEST_OUTPUT === '1'
+const outputRoot = join(process.cwd(), 'output')
+if (keepOutput) mkdirSync(outputRoot, { recursive: true })
+const root = keepOutput
+  ? mkdtempSync(join(outputRoot, 'tool-result-artifact-'))
+  : mkdtempSync(join(tmpdir(), 'mfa-tool-result-artifact-'))
 
 class LargeResultLlm {
   constructor() {
@@ -78,18 +83,28 @@ try {
   const events = await readJsonLines(session.eventsPath)
   const toolResult = transcript.find((entry) => entry.type === 'tool_result' && entry.name === 'large_result')
   assert.equal(result.toolCalls, 1)
-  assert(toolResult?.result?.artifact, 'large tool_result should include an artifact reference')
-  assert.equal(toolResult.result.artifact.kind, 'persisted_tool_result')
-  assert(existsSync(toolResult.result.artifact.path), 'large tool_result artifact should exist')
+  const artifact = toolResult?.artifacts?.[0]
+  assert(artifact, 'large tool_result should include an artifact reference')
+  assert.equal(artifact.schemaVersion, 'tool-result-artifact-ref/v1')
+  assert.equal(artifact.kind, 'generic_json')
+  assert.equal(artifact.toolName, 'large_result')
+  assert.equal(artifact.toolCallId, 'large-result-call')
+  assert.equal(typeof artifact.sha256, 'string')
+  assert(existsSync(artifact.uri), 'large tool_result artifact should exist')
   assert(
-    events.some((event) => event.type === 'tool_completed' && event.data?.result?.artifact?.kind === 'persisted_tool_result'),
+    events.some((event) => event.type === 'tool_completed' && event.data?.artifacts?.[0]?.artifactId === artifact.artifactId),
     'tool_completed event should include artifact metadata',
+  )
+  assert(
+    events.some((event) => event.type === 'tool_result_artifact' && event.data?.artifact?.artifactId === artifact.artifactId),
+    'events should include explicit tool_result_artifact metadata',
   )
 
   trace.finish()
   console.log('tool-result-artifact-test: PASS')
 } finally {
-  rmSync(root, { recursive: true, force: true })
+  if (keepOutput) console.log(`tool-result-artifact-test: OUTPUT ${root}`)
+  else rmSync(root, { recursive: true, force: true })
 }
 
 function testProfile() {

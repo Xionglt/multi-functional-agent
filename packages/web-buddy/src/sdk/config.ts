@@ -89,6 +89,7 @@ export interface AgentConfig {
   model: ModelConfig
   resumePath: string
   alibabaCareersUrl: string
+  alibabaProbePositionId: string
   alibabaProbeJobTitle: string
   browser: BrowserRuntimeConfig
   trace: { outDir: string }
@@ -109,7 +110,21 @@ export interface AgentConfig {
   memory: {
     answerStorePath: string
     permissionRulesPath: string
+    memdirPath: string
   }
+}
+
+export interface AgentConfigOverrides extends Partial<Omit<
+  AgentConfig,
+  'model' | 'browser' | 'trace' | 'human' | 'auth' | 'agent' | 'memory'
+>> {
+  model?: Partial<ModelConfig>
+  browser?: Partial<BrowserRuntimeConfig>
+  trace?: Partial<AgentConfig['trace']>
+  human?: Partial<HumanLoopConfig>
+  auth?: Partial<AgentConfig['auth']>
+  agent?: Partial<AgentConfig['agent']>
+  memory?: Partial<AgentConfig['memory']>
 }
 
 const REPO_ROOT = resolve(
@@ -172,6 +187,13 @@ function expandKnownRecruitmentAllowedDomains(domains: string[]): string[] {
   return [...expanded]
 }
 
+function normalizeAllowedDomains(value: string | string[]): string[] {
+  const domains = Array.isArray(value) ? value : value.split(',')
+  return domains
+    .map((domain) => domain.trim().toLowerCase())
+    .filter(Boolean)
+}
+
 /**
  * Build a fully-resolved AgentConfig.
  *
@@ -179,7 +201,7 @@ function expandKnownRecruitmentAllowedDomains(domains: string[]): string[] {
  * file > baked default. The model API key comes from MODEL_API_KEY; when it is
  * absent the SDK still runs on the deterministic heuristic path.
  */
-export function loadConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
+export function loadConfig(overrides: AgentConfigOverrides = {}): AgentConfig {
   const dotEnv = loadDotEnv(join(REPO_ROOT, '.env'))
   const dotEnvPkg = loadDotEnv(join(process.cwd(), '.env'))
   const env: Record<string, string | undefined> = {
@@ -241,17 +263,17 @@ export function loadConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
   const visualHighlight = boolEnv(env, 'PLAYWRIGHT_VISUAL_HIGHLIGHT', !headless)
 
   const allowedDomainsRaw = overrides.browser?.allowedDomains ?? env.PLAYWRIGHT_ALLOWED_DOMAINS ?? ''
-  const allowedDomains = expandKnownRecruitmentAllowedDomains(allowedDomainsRaw
-    .split(',')
-    .map((d) => d.trim().toLowerCase())
-    .filter(Boolean))
+  const allowedDomains = expandKnownRecruitmentAllowedDomains(normalizeAllowedDomains(allowedDomainsRaw))
 
   return {
     model,
     resumePath: overrides.resumePath ?? env.RESUME_PDF_PATH ?? join(REPO_ROOT, 'tmp', 'pdfs', 'resume.pdf'),
     alibabaCareersUrl:
       overrides.alibabaCareersUrl ?? env.ALIBABA_CAREERS_URL ?? 'https://talent-holding.alibaba.com/off-campus/position-list?lang=zh',
-    alibabaProbeJobTitle: overrides.alibabaProbeJobTitle ?? env.ALIBABA_PROBE_JOB_TITLE ?? '',
+    alibabaProbePositionId:
+      overrides.alibabaProbePositionId ?? env.ALIBABA_PROBE_POSITION_ID ?? env.DELIVERY_TARGET_POSITION_ID ?? '',
+    alibabaProbeJobTitle:
+      overrides.alibabaProbeJobTitle ?? env.ALIBABA_PROBE_JOB_TITLE ?? env.DELIVERY_TARGET_JOB_TITLE ?? '',
     browser: {
       headless,
       visualHighlight,
@@ -295,6 +317,11 @@ export function loadConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
         overrides.memory?.permissionRulesPath ??
           env.WEB_BUDDY_PERMISSION_RULES_PATH ??
           join(defaultMemoryDir(env), 'permission-rules.json'),
+      ),
+      memdirPath: resolve(
+        overrides.memory?.memdirPath ??
+          env.WEB_BUDDY_MEMDIR_PATH ??
+          defaultMemoryDir(env),
       ),
     },
   }

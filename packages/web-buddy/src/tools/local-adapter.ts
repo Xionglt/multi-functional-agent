@@ -14,7 +14,7 @@ import { browserSnapshot } from '../browser/snapshot.js'
 import { browserType } from '../browser/type.js'
 import { browserUploadFile } from '../browser/upload-file.js'
 import { browserWait } from '../browser/wait.js'
-import type { AnswerStore, UserAnswer } from '../context/answer-store.js'
+import { classifyUserAnswer, type AnswerStore, type UserAnswer } from '../context/answer-store.js'
 import { isProfileSection, type ProfileStore } from '../context/profile-store.js'
 import { createFieldPlanner } from '../fill/field-planner.js'
 import type { FieldPlan } from '../fill/field-plan.js'
@@ -295,15 +295,22 @@ const localHandlers: Record<string, LocalHandler> = {
         pageChanged: false,
       }
     }
-    const userAnswer: UserAnswer = {
+    const userAnswer = classifyUserAnswer({
       field,
       question,
       answer,
       at: new Date().toISOString(),
       source: 'ask_user',
       ...(options?.length ? { options } : {}),
-    }
+    })
     ctx.answerStore?.put(userAnswer)
+    if (!userAnswer.reusable || userAnswer.sensitivity === 'secret') {
+      return {
+        observation: `ask_user received a sensitive answer for "${field}" and did not save it for reuse.`,
+        data: { userAnswer: { ...userAnswer, answer: '[redacted]' }, reused: false, saved: false },
+        pageChanged: false,
+      }
+    }
     return {
       observation: `ask_user received answer for "${field}": ${answer}`,
       data: { userAnswer, reused: false },

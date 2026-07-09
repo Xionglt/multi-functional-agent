@@ -83,6 +83,8 @@ export interface ResumeProfileV2 {
   }
 }
 
+type ResumeArrayKey = 'targetRoles' | 'projects' | 'experience' | 'education' | 'keywords'
+
 export type ResumeIngestLlm = Pick<LlmGateway, 'hasKey' | 'generateJson'>
 
 export interface ResumeIngestOptions {
@@ -654,12 +656,11 @@ function repairMissingLlmFields(
   backfillScalar('summary', 'Summary field backfilled by deterministic resume parser.')
   backfillScalar('seniority', 'Seniority field backfilled by deterministic resume parser.')
 
-  const backfillArray = (
-    key: 'targetRoles' | 'projects' | 'experience' | 'education' | 'keywords',
-    warning: string,
-  ) => {
-    if (missingArrayField(next[key]) && fallback[key].value.length > 0) {
-      next[key] = fallback[key]
+  const backfillArray = <K extends ResumeArrayKey>(key: K, warning: string) => {
+    const current = next[key]
+    const replacement = fallback[key]
+    if (current.value.length === 0 && replacement.value.length > 0) {
+      next[key] = replacement
       warnings.push(warning)
     }
   }

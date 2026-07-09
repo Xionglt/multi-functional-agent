@@ -151,7 +151,9 @@ class PrematureFillDoneLlm {
     }
     if (this.calls === 2) {
       assert(
-        rendered.includes('PREMATURE_AGENT_DONE_REJECTED') && rendered.includes('Form coverage must show scrolledBottom=true'),
+        rendered.includes('PREMATURE_AGENT_DONE_REJECTED') &&
+          rendered.includes('scope=viewport') &&
+          rendered.includes('missingRequired may be incomplete'),
         'runtime should return executable fill-completeness gaps to the model',
       )
       return {
@@ -186,6 +188,64 @@ class PrematureFillDoneLlm {
     return {
       content: 'The required field is filled and audited.',
       toolCalls: [{ id: 'done-after-fill', name: 'agent_done', arguments: { summary: 'Filled required fields.', blocked: false } }],
+    }
+  }
+}
+
+class RequiredSelectPlaceholderLlm {
+  constructor() {
+    this.hasKey = true
+    this.label = 'required-select-placeholder-llm'
+    this.calls = 0
+  }
+
+  async chatWithTools(messages) {
+    this.calls += 1
+    const rendered = JSON.stringify(messages)
+    if (this.calls === 1) {
+      return {
+        content: 'I need a full audit before trusting required fields.',
+        toolCalls: [{ id: 'audit-select-form', name: 'browser_form_audit', arguments: {} }],
+      }
+    }
+    if (this.calls === 2) {
+      assert(rendered.includes('formCoverage: scope=full_audit'), 'runtime prompt should include full audit coverage')
+      assert(rendered.includes('Preferred role track'), 'runtime prompt should show the required select blocker')
+      return {
+        content: 'I think the select placeholder is acceptable.',
+        toolCalls: [{ id: 'premature-select-done', name: 'agent_done', arguments: { summary: 'Required select is fine.', blocked: false } }],
+      }
+    }
+    if (this.calls === 3) {
+      assert(
+        rendered.includes('PREMATURE_AGENT_DONE_REJECTED') && rendered.includes('Preferred role track'),
+        'runtime should reject agent_done while required select placeholder remains missingRequired',
+      )
+      return {
+        content: 'I will choose a real role track.',
+        toolCalls: [{
+          id: 'set-role-track',
+          name: 'browser_set_field',
+          arguments: {
+            label: 'Preferred role track',
+            fieldKey: 'role-track',
+            fieldIndex: 0,
+            controlKind: 'select_native',
+            intendedValue: 'Frontend',
+          },
+        }],
+      }
+    }
+    if (this.calls === 4) {
+      return {
+        content: 'I will audit again after selecting the required role.',
+        toolCalls: [{ id: 'audit-after-select', name: 'browser_form_audit', arguments: {} }],
+      }
+    }
+    assert(rendered.includes('missingRequiredCount: 0'), 'required select should clear missingRequired after selecting a real option')
+    return {
+      content: 'The required select is filled and audited.',
+      toolCalls: [{ id: 'done-after-select', name: 'agent_done', arguments: { summary: 'Selected required role.', blocked: false } }],
     }
   }
 }
@@ -249,7 +309,8 @@ try {
     llm: loginResumeLlm,
     ctx: { sessionId: 'workflow-login-resume', highlight: false, trace },
     gate: new LoginClearingGate(),
-    maxSteps: 3,
+    taskType: 'apply_entry',
+    maxSteps: 5,
   })
   assert.equal(loginResumeLlm.calls >= 2, true, 'runtime should continue after premature blocked=true once login is cleared')
   assert.equal(loginResumeResult.done, true)
@@ -355,10 +416,39 @@ try {
     maxSteps: 7,
   })
   assert.equal(prematureFillLlm.calls >= 4, true, 'runtime should continue after premature fill agent_done')
-  assert.equal(prematureFillResult.done, true)
+  assert.equal(prematureFillResult.done, false)
   assert.equal(prematureFillResult.blocked, false)
-  assert.match(prematureFillResult.summary, /Filled required fields/i)
+  assert.equal(prematureFillResult.stopReason, 'step_budget')
+  assert.match(prematureFillResult.summary, /Reached step budget/i)
   assert.equal(await sessionManager.get('workflow-premature-fill-done')?.page.locator('#name').inputValue(), 'Zhang San')
+
+  await openHtml('workflow-required-select-placeholder', `<!doctype html><html><head><title>Application Form</title></head><body>
+    <h1>Application form</h1>
+    <form>
+      <label for="role-track">Preferred role track *</label>
+      <select id="role-track" name="role-track" required>
+        <option value="" selected>Select one</option>
+        <option value="Frontend">Frontend</option>
+        <option value="Backend">Backend</option>
+      </select>
+      <button type="button">Save draft</button>
+    </form>
+  </body></html>`)
+  const requiredSelectLlm = new RequiredSelectPlaceholderLlm()
+  const requiredSelectResult = await runtime.run({
+    goal: 'Fill the current application form.',
+    resume: profile,
+    llm: requiredSelectLlm,
+    ctx: { sessionId: 'workflow-required-select-placeholder', highlight: false, trace },
+    gate: new AutoHumanGate(),
+    maxSteps: 7,
+  })
+  assert.equal(requiredSelectLlm.calls >= 5, true, 'runtime should continue after required select placeholder agent_done')
+  assert.equal(requiredSelectResult.done, false)
+  assert.equal(requiredSelectResult.blocked, false)
+  assert.equal(requiredSelectResult.stopReason, 'step_budget')
+  assert.match(requiredSelectResult.summary, /Reached step budget/i)
+  assert.equal(await sessionManager.get('workflow-required-select-placeholder')?.page.locator('#role-track').inputValue(), 'Frontend')
 
   console.log('agent-runtime-workflow-test: PASS')
 } finally {

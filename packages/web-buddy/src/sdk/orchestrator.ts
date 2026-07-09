@@ -124,6 +124,10 @@ export interface RunOptions {
   taskType?: WebBuddyTaskType
   /** Explicitly require uploading the current local resume file before completion. */
   requiresCurrentResumeUpload?: boolean
+  /** Explicit live delivery probe target; avoids drifting to the current first live job. */
+  targetPositionId?: string
+  /** Explicit live delivery probe title target when a position id is unavailable. */
+  targetJobTitle?: string
 }
 
 function mockApplicationFormUrl(profile: ResumeProfile): string {
@@ -506,15 +510,36 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
         return finalizeRun({ mode, profile, matches: [], finalState: 'no_jobs', message: 'No jobs found on the Alibaba list page.', trace, emit })
       }
 
-      matches = pipeline.matches
-      const best = pipeline.decision.best
-      if (!pipeline.decision.shouldApply || !best) {
+      const explicitTarget = explicitAlibabaTarget(options, config)
+      const explicitMatch = explicitTarget ? chooseExplicitAlibabaMatch(profile, pipeline, explicitTarget) : undefined
+      if (explicitTarget && !explicitMatch) {
+        return finalizeRun({
+          mode,
+          profile,
+          matches: pipeline.matches,
+          finalState: 'no_match',
+          message: `Explicit Alibaba probe target was not found in scanned jobs: ${explicitTargetLabel(explicitTarget)}.`,
+          trace,
+          emit,
+        })
+      }
+      matches = explicitMatch ? promoteExplicitMatch(pipeline.matches, explicitMatch) : pipeline.matches
+      const decision = explicitMatch
+        ? {
+            threshold: pipeline.decision.threshold,
+            shouldApply: true,
+            best: explicitMatch,
+            reason: `Explicit Alibaba probe target matched: ${explicitTargetLabel(explicitTarget!)}. ${explicitMatch.reason}`,
+          }
+        : pipeline.decision
+      const best = decision.best
+      if (!decision.shouldApply || !best) {
         return finalizeRun({
           mode,
           profile,
           matches,
           finalState: 'no_match',
-          message: `No suitable Alibaba job match found. ${pipeline.decision.reason}`,
+          message: `No suitable Alibaba job match found. ${decision.reason}`,
           trace,
           emit,
         })
@@ -526,9 +551,10 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
         best.job.location ? `Location: ${best.job.location}.` : '',
         best.job.detailUrl ? `Detail URL: ${best.job.detailUrl}.` : '',
         `Match score: ${best.score.toFixed(2)}. ${best.reason}`,
+        explicitTarget ? `Explicit probe target: ${explicitTargetLabel(explicitTarget)}.` : '',
         'Use the current Alibaba page and any visible job/application information to fill only fields that can be mapped confidently from the resume.',
       ].filter(Boolean).join('\n')
-      trace.record({ phase: 'match', action: `Selected Alibaba match: ${best.job.title} (score ${best.score.toFixed(2)}; threshold ${pipeline.decision.threshold.toFixed(2)}).`, status: 'ok', observation: `${best.reason}\n${pipeline.decision.reason}` })
+      trace.record({ phase: 'match', action: `Selected Alibaba match: ${best.job.title} (score ${best.score.toFixed(2)}; threshold ${decision.threshold.toFixed(2)}).`, status: 'ok', observation: `${best.reason}\n${decision.reason}` })
       emit({ phase: 'match', message: `Best match → ${best.job.title} (score ${best.score.toFixed(2)})`, level: 'info' })
       matches.slice(0, 5).forEach((m, i) => emit({ phase: 'match', message: `  ${i + 1}. ${m.job.title} — ${m.score.toFixed(2)} — ${m.matchedSkills.slice(0, 5).join(', ')}`, level: 'info' }))
 
@@ -723,6 +749,8 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
         }),
         allowFinalSubmit: config.human.allowFinalSubmit,
         persistentAnswerStore: { path: config.memory.answerStorePath },
+        persistentPermissionRules: { path: config.memory.permissionRulesPath },
+        memdir: { path: config.memory.memdirPath },
         maxSteps: config.agent.maxSteps,
         taskType,
         requiresCurrentResumeUpload: options.requiresCurrentResumeUpload ?? false,
@@ -997,6 +1025,90 @@ function mergeCoarseAndDetailMatches(coarseMatches: MatchScore[], detailMatches:
   })
   merged.sort((a, b) => b.score - a.score || b.matchedSkills.length - a.matchedSkills.length)
   return merged
+}
+
+interface ExplicitAlibabaTarget {
+  positionId?: string
+  jobTitle?: string
+}
+
+function explicitAlibabaTarget(options: RunOptions, config: AgentConfig): ExplicitAlibabaTarget | undefined {
+  const positionId = firstTrimmed(options.targetPositionId, config.alibabaProbePositionId)
+  const jobTitle = firstTrimmed(options.targetJobTitle, config.alibabaProbeJobTitle)
+  if (!positionId && !jobTitle) return undefined
+  return {
+    ...(positionId ? { positionId } : {}),
+    ...(jobTitle ? { jobTitle } : {}),
+  }
+}
+
+function chooseExplicitAlibabaMatch(
+  profile: ResumeProfile,
+  pipeline: AlibabaMatchPipelineResult,
+  target: ExplicitAlibabaTarget,
+): MatchScore | undefined {
+  const existing = pipeline.matches.find((match) => alibabaJobMatchesTarget(match.job, target))
+  if (existing) {
+    return {
+      ...existing,
+      reason: `Explicit probe target selected from ranked matches. ${existing.reason}`,
+    }
+  }
+
+  const job = pipeline.jobs.find((candidate) => alibabaJobMatchesTarget(candidate, target))
+  if (!job) return undefined
+
+  const heuristic = matchJobs(profile, [job])[0]
+  return {
+    job,
+    score: Math.max(heuristic?.score ?? 0, 1),
+    reason: [
+      'Explicit probe target selected from scanned jobs.',
+      heuristic?.reason ?? 'No heuristic score was available before target selection.',
+    ].join(' '),
+    matchedSkills: heuristic?.matchedSkills ?? [],
+    missingSkills: heuristic?.missingSkills ?? [],
+    ...(heuristic?.context ? { context: heuristic.context } : {}),
+    ...(heuristic?.tagTaxonomy ? { tagTaxonomy: heuristic.tagTaxonomy } : {}),
+  }
+}
+
+function promoteExplicitMatch(matches: MatchScore[], explicitMatch: MatchScore): MatchScore[] {
+  const keys = new Set(jobIdentityKeys(explicitMatch.job))
+  const rest = matches.filter((match) => !jobIdentityKeys(match.job).some((key) => keys.has(key)))
+  return [explicitMatch, ...rest]
+}
+
+function alibabaJobMatchesTarget(job: JobPosting, target: ExplicitAlibabaTarget): boolean {
+  const scraped = job as ScrapedJob
+  if (target.positionId && scraped.positionId && normalizePositionId(scraped.positionId) === normalizePositionId(target.positionId)) {
+    return true
+  }
+  if (target.jobTitle && compactTargetText(job.title) === compactTargetText(target.jobTitle)) return true
+  return false
+}
+
+function explicitTargetLabel(target: ExplicitAlibabaTarget): string {
+  return [
+    target.positionId ? `positionId=${target.positionId}` : '',
+    target.jobTitle ? `title=${target.jobTitle}` : '',
+  ].filter(Boolean).join(', ')
+}
+
+function firstTrimmed(...values: Array<string | undefined>): string | undefined {
+  for (const value of values) {
+    const trimmed = value?.trim()
+    if (trimmed) return trimmed
+  }
+  return undefined
+}
+
+function normalizePositionId(value: string): string {
+  return value.trim().replace(/^alibaba-/i, '')
+}
+
+function compactTargetText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
 }
 
 function clampMatchScore(score: number): number {

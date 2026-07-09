@@ -145,11 +145,13 @@ function hasFinalSubmitRecoveryFact(restored: RestoredSessionState): boolean {
 }
 
 function restoredPolicyFacts(restored: RestoredSessionState): WorkflowPolicyFact[] | undefined {
-  const facts = restored.workflowEvidence
-    .filter((evidence) => evidence.kind === 'policy')
-    .map((evidence) => cloneRecord(record(evidence.data)))
-    .filter((fact) => Object.keys(fact).length > 0)
-  return facts.length > 0 ? (facts as WorkflowPolicyFact[]) : undefined
+  const facts: WorkflowPolicyFact[] = []
+  for (const evidence of restored.workflowEvidence) {
+    if (evidence.kind !== 'policy') continue
+    const fact = cloneRecord(record(evidence.data))
+    if (isWorkflowPolicyFact(fact)) facts.push(fact)
+  }
+  return facts.length > 0 ? facts : undefined
 }
 
 function restoredPermissionFacts(restored: RestoredSessionState): WorkflowPermissionFact[] | undefined {
@@ -264,4 +266,22 @@ function record(value: unknown): Record<string, unknown> {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined
+}
+
+function isWorkflowPolicyFact(fact: unknown): fact is WorkflowPolicyFact {
+  const data = record(fact)
+  return (
+    isPolicyAction(data.action) &&
+    isPolicyRiskLevel(data.riskLevel) &&
+    typeof data.reason === 'string' &&
+    (data.policyCode === undefined || typeof data.policyCode === 'string')
+  )
+}
+
+function isPolicyAction(value: unknown): value is WorkflowPolicyFact['action'] {
+  return value === 'allow' || value === 'gate' || value === 'block' || value === 'auto_confirm'
+}
+
+function isPolicyRiskLevel(value: unknown): value is WorkflowPolicyFact['riskLevel'] {
+  return value === 'low' || value === 'medium' || value === 'high' || value === 'critical'
 }

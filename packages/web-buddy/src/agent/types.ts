@@ -74,6 +74,7 @@ export interface PromptAssemblerInput {
   taskState?: TaskState
   workflowState?: WorkflowState
   runMemory?: RunMemory
+  relevantMemories?: string
   fieldPlan?: FieldPlan
   fillLedgerSummary?: FillLedgerSummary
   answerSummary?: string

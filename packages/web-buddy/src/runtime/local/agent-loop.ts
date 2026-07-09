@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import { browserSnapshot } from '../../browser/snapshot.js'
 import { browserFormSnapshot } from '../../browser/form-snapshot.js'
 import {
@@ -7,12 +8,16 @@ import {
   renderUserContext,
 } from '../../agent/prompt-assembler.js'
 import {
-  contextCompactor as defaultContextCompactor,
   type ContextCompactionInput,
   type ContextCompactionWorkflowEvaluation,
-  type ContextCompactionResult,
 } from '../../context/compaction.js'
+import type { ContextCompactionResult } from '../../context/run-summary.js'
 import { COMPACTED_RUN_CONTEXT_PREFIX } from '../../context/run-summary.js'
+import {
+  compactContextIfNeeded,
+  type SemanticCompactionPipelineOptions,
+} from '../../context/compaction-pipeline.js'
+import type { MicroCompactionOptions } from '../../context/micro-compaction.js'
 import {
   compactRunMemory,
   createRunMemory,
@@ -22,6 +27,7 @@ import {
 } from '../../context/run-memory.js'
 import type { ContextRecentAction, ContextSnapshot } from '../../context/types.js'
 import { AnswerStore, type UserAnswer } from '../../context/answer-store.js'
+import { ensureMemdir, queryMemdir, renderMemorySearchResult } from '../../memory/index.js'
 import { ProfileStore } from '../../context/profile-store.js'
 import { createFieldPlanner } from '../../fill/field-planner.js'
 import type { FieldPlan } from '../../fill/field-plan.js'
@@ -31,9 +37,13 @@ import {
   type FillLedgerEntryStatus,
   type FillLedgerSummary,
 } from '../../fill/fill-ledger.js'
-import { estimateTokenBudget, type TokenBudgetOptions, type TokenBudgetSnapshot } from '../../kernel/token-budget.js'
+import type { TokenBudgetOptions } from '../../kernel/token-budget.js'
 import { ApprovalQueue } from '../../permission/approval-queue.js'
 import { PermissionEngine } from '../../permission/permission-engine.js'
+import {
+  appendPersistentPermissionRule,
+  persistentPermissionRuleFromDecision,
+} from '../../permission/persistent-rules.js'
 import {
   createToolPermissionRequest,
   createWorkflowHandoffPermissionRequest,
@@ -45,6 +55,7 @@ import {
   type ApprovalResolveResult,
   type PermissionDecision,
   type PermissionMode,
+  type PermissionRememberScope,
   type PermissionRequest,
 } from '../../permission/permission-types.js'
 import { decideToolPolicy, shouldStopAfterGateDecision, type PolicyEngineDecision } from '../../policy/agent-policy.js'
@@ -76,6 +87,13 @@ import type { RiskLevel } from '../../sdk/trace.js'
 import type { LocalToolRunResult } from '../../tools/local-adapter.js'
 import { ToolExecutionService } from '../../tools/tool-execution-service.js'
 import { toLegacyToolRunResult, type NormalizedToolResult } from '../../tools/tool-result.js'
+import {
+  FileToolResultStore,
+  type ToolResultArtifactKind,
+  type ToolResultArtifactRef,
+  type ToolResultArtifactSensitivity,
+  type ToolResultStore,
+} from '../../tools/tool-result-store.js'
 import {
   completionGate as defaultCompletionGate,
   type CompletionGateDecision,
@@ -124,6 +142,8 @@ export interface AgentLoopInput {
   allowFinalSubmit?: boolean
   /** Optional append-only session recorder for resumable runtime state. */
   session?: SessionRecorder
+  /** Chat transcript restored from session transcript and prepended to the next model call. */
+  restoredMessages?: ChatMessage[]
   /** Optional kernel/run-controller abort signal. Checked before model/tool work. */
   abortSignal?: AbortSignal
   /** Optional execution service for tests or alternate local runtimes. */
@@ -134,14 +154,24 @@ export interface AgentLoopInput {
   approvalQueue?: AgentLoopApprovalQueue
   /** Context budget. When maxInputTokens is unset, a conservative default window is used. */
   contextBudget?: ContextBudgetOptions
+  /** Optional micro-compaction controls for old tool results and snapshots. */
+  microCompaction?: MicroCompactionOptions
+  /** Optional semantic compaction controls. Enabled by default when the LLM supports chat(). */
+  semanticCompaction?: SemanticCompactionPipelineOptions
   /** Optional user-scoped answer memory persisted across runs. */
   persistentAnswerStore?: PersistentAnswerStoreOptions
+  /** Optional user-scoped permission memory persisted across runs. */
+  persistentPermissionRules?: PersistentPermissionRulesOptions
+  /** Optional memdir root for scoped long-term memory retrieval. */
+  memdir?: MemdirOptions
   /** Optional deterministic compactor for tests or alternate local runtimes. */
   contextCompactor?: AgentLoopContextCompactor
   /** Optional workflow evaluator for tests or alternate local runtimes. */
   workflowEngine?: AgentLoopWorkflowEngine
   /** Optional completion gate for tests or alternate local runtimes. */
   completionGate?: AgentLoopCompletionGate
+  /** Optional store for large tool-result artifacts. Defaults to the run trace artifact directory. */
+  toolResultStore?: ToolResultStore
 }
 
 export interface AgentLoopResult {
@@ -174,8 +204,16 @@ export interface PersistentAnswerStoreOptions {
   path: string
 }
 
+export interface PersistentPermissionRulesOptions {
+  path: string
+}
+
+export interface MemdirOptions {
+  path: string
+}
+
 export interface AgentLoopContextCompactor {
-  compact(input: ContextCompactionInput): ContextCompactionResult
+  compact(input: ContextCompactionInput): ContextCompactionResult | Promise<ContextCompactionResult>
 }
 
 export interface AgentLoopWorkflowEngine {
@@ -184,6 +222,20 @@ export interface AgentLoopWorkflowEngine {
 
 export interface AgentLoopCompletionGate {
   evaluate(input: CompletionGateInput): CompletionGateDecision
+}
+
+interface PermissionGateResponse {
+  decision: GateDecision
+  rememberScope?: Extract<PermissionRememberScope, 'session' | 'always'>
+}
+
+interface RememberingHumanGate extends HumanGate {
+  confirmPermission?(
+    kind: GateKind,
+    message: string,
+    context: Parameters<HumanGate['confirm']>[2],
+    permission: { request: PermissionRequest; decision: PermissionDecision },
+  ): Promise<GateDecision | PermissionGateResponse>
 }
 
 const DEFAULT_MAX_STEPS = 16
@@ -240,6 +292,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   const completionGate = input.completionGate ?? defaultCompletionGate
   const workflowEvidenceStore = new EvidenceStore()
   const session = input.session
+  const toolResultStore = input.toolResultStore ?? new FileToolResultStore({
+    rootDir: join(ctx.trace.agentTrace?.dir ?? ctx.trace.dir, 'artifacts', 'tool-results'),
+  })
 
   let step = 0
   let toolCalls = 0
@@ -255,6 +310,8 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   const approvals: ApprovalRequest[] = []
   const runMemory = createRunMemory()
   let workflowHandoffAttempt = 0
+  let lastRecordedSkillContextSignature = ''
+  let lastRecordedRelevantMemorySignature = ''
   const riskDecisions = createRiskDecisionsArtifact({
     runId: ctx.trace.runId,
     sessionId: ctx.trace.agentTrace?.sessionId ?? ctx.sessionId,
@@ -309,6 +366,68 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       data: { memory },
     })
   }
+  const recordSkillContextForSession = async (
+    snapshot: ContextSnapshot,
+    currentStep: number,
+    reason: string,
+  ) => {
+    const skillContext = snapshot.resolvedSkillContext
+    if (!skillContext) return
+    const signature = skillContextSessionSignature(skillContext)
+    if (signature === lastRecordedSkillContextSignature) return
+    lastRecordedSkillContextSignature = signature
+    const turnId = currentStep > 0 ? turnIdForStep(currentStep) : undefined
+    await sessionTranscript({
+      type: 'skill_context',
+      ...(turnId ? { turnId } : {}),
+      context: skillContext,
+      reason,
+    })
+    await sessionEvent({
+      type: 'skill_resolved',
+      ...(turnId ? { turnId } : {}),
+      message: `Resolved ${skillContext.skills.length} skill(s).`,
+      data: {
+        schemaVersion: skillContext.schemaVersion,
+        skillHits: skillContext.skills.length,
+        skills: skillContext.skills,
+        policyHintCount: skillContext.policyHints.length,
+        completionCriterionCount: skillContext.completionCriteria.length,
+        memoryQueryCount: skillContext.memoryQueries.length,
+        ignoredRelaxations: skillContext.safetyInvariantDigest.ignoredRelaxations,
+        reason,
+      },
+    })
+  }
+  const recordRelevantMemoriesForSession = async (
+    snapshot: ContextSnapshot,
+    currentStep: number,
+    reason: string,
+  ) => {
+    const relevantMemories = snapshot.relevantMemories
+    if (!relevantMemories) return
+    const signature = relevantMemories
+    if (signature === lastRecordedRelevantMemorySignature) return
+    lastRecordedRelevantMemorySignature = signature
+    const turnId = currentStep > 0 ? turnIdForStep(currentStep) : undefined
+    const data = {
+      source: 'memdir',
+      chars: relevantMemories.length,
+      preview: truncateForWorkflowEvidence(relevantMemories.replace(/\s+/g, ' ').trim(), 500),
+      reason,
+    }
+    ctx.trace.agentTrace?.recordEvent('memory_retrieved', {
+      step: currentStep,
+      sessionId: session?.session.sessionId ?? ctx.sessionId,
+      ...data,
+    })
+    await sessionEvent({
+      type: 'memory_retrieved',
+      ...(turnId ? { turnId } : {}),
+      message: 'Relevant memories selected for prompt context.',
+      data,
+    })
+  }
   const syncFillLedgerSummary = (snapshot?: ContextSnapshot): FillLedgerSummary => {
     const summary = fillLedger.summary()
     ctx.fillLedgerSummary = summary
@@ -334,6 +453,18 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       sourceFormUrl: snapshot.form.url,
     })
     return buildLoopContextWithWorkflow(loopInput, workflowState, runMemory, recentActions, blockers)
+  }
+  const refreshLoopContext = async (reason: string, currentStep: number): Promise<ContextSnapshot> => {
+    const snapshot = await ensureFieldPlan(await buildLoopContextWithWorkflow(
+      loopInput,
+      workflowState,
+      runMemory,
+      recentActions,
+      blockers,
+    ))
+    await recordSkillContextForSession(snapshot, currentStep, reason)
+    await recordRelevantMemoriesForSession(snapshot, currentStep, reason)
+    return snapshot
   }
   const addWorkflowEvidence = async (
     evidenceInput: AddWorkflowEvidenceInput,
@@ -455,6 +586,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       approvalResolution?: ApprovalResolution
       toolName?: string
       toolResult?: NormalizedToolResult | LocalToolRunResult
+      gateKind?: GateKind
+      gateDecision?: GateDecision
+      agentDoneBlocked?: boolean
     } = {},
   ): Promise<WorkflowEngineEvaluation> => {
     await addContextWorkflowEvidence(evaluationInput, currentStep)
@@ -630,11 +764,13 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     approval: ApprovalRequest,
     gateDecision: GateDecision,
     currentStep: number,
+    rememberScope?: Extract<PermissionRememberScope, 'session' | 'always'>,
   ): Promise<ApprovalRequest> => {
     const resolved = approvalQueue.resolve(approval.approvalId, {
       decision: gateDecision,
       source: 'human_gate',
       reason: `HumanGate returned ${gateDecision}.`,
+      ...(rememberScope ? { data: { rememberScope } } : {}),
     })
     rememberApproval(approvals, resolved)
     const approvalData = approvalMetadata(resolved)
@@ -774,15 +910,13 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     // no page yet — the model can call browser_open itself
   }
 
-  let latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, runMemory, recentActions, blockers)
-  latestContext = await ensureFieldPlan(latestContext)
+  let latestContext = await refreshLoopContext('Initial context built.', step)
   const refreshLatestContextForAgentDone = async (currentStep: number): Promise<ContextSnapshot> => {
     const page = sessionManager.get(ctx.sessionId)?.page
     await page?.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
     await browserSnapshot({ sessionId: ctx.sessionId }).catch(() => undefined)
     await browserFormSnapshot({ sessionId: ctx.sessionId }).catch(() => undefined)
-    latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, runMemory, recentActions, blockers)
-    latestContext = await ensureFieldPlan(latestContext)
+    latestContext = await refreshLoopContext('Refreshed context before agent_done.', currentStep)
     syncFillLedgerSummary(latestContext)
     ctx.trace.record({
       phase: 'agent_loop',
@@ -818,8 +952,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         status: 'ok',
       })
     }
-    latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, runMemory, recentActions, blockers)
-    latestContext = await ensureFieldPlan(latestContext)
+    latestContext = await refreshLoopContext(`Refreshed context after ${handoffKind} handoff.`, currentStep)
     syncFillLedgerSummary(latestContext)
     const contextWorkflow = await evaluateWorkflow(currentStep, `Workflow handoff ${handoffKind} approved; refreshed page state.`, {
       currentUrl: page?.url(),
@@ -827,8 +960,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       form: latestContext.form,
     })
     if (contextWorkflow.changed) {
-      latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, runMemory, recentActions, blockers)
-      latestContext = await ensureFieldPlan(latestContext)
+      latestContext = await refreshLoopContext(`Workflow handoff ${handoffKind} changed context.`, currentStep)
     }
     return workflowHandoffSummary(workflowState)
   }
@@ -872,8 +1004,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     form: latestContext.form,
   })
   if (initialWorkflow.changed) {
-    latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, runMemory, recentActions, blockers)
-    latestContext = await ensureFieldPlan(latestContext)
+    latestContext = await refreshLoopContext('Initial workflow changed context.', step)
   }
   const initialHandoffSummary = workflowHandoffSummary(workflowState)
   if (initialHandoffSummary) {
@@ -887,29 +1018,18 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     firstView = ''
   }
   syncFillLedgerSummary(latestContext)
-  let messages: ChatMessage[] = [
-    { role: 'system', content: renderSystemContext(latestContext) },
-    { role: 'user', content: renderInitialUserContext(latestContext, firstView) },
-  ]
+  let messages: ChatMessage[] = initialMessageSet(latestContext, firstView, input.restoredMessages)
   const maybeCompactMessages = async (turnId: string) => {
-    const tokenBudget = estimateTokenBudget(messages, input.contextBudget)
-    await sessionEvent({
-      type: 'token_budget_updated',
-      turnId,
-      message: 'Token budget updated.',
-      data: { tokenBudget },
-    })
-
-    if (!tokenBudget.compactRecommended) return
-
-    const compactor = input.contextCompactor ?? defaultContextCompactor
-    const compaction = compactor.compact({
+    const compaction = await compactContextIfNeeded({
       goal,
       runId: session?.session.runId ?? ctx.trace.runId,
       sessionId: session?.session.sessionId ?? ctx.sessionId,
       turnId,
       step,
       messages,
+      systemContent: renderSystemContext(latestContext),
+      tokenBudgetOptions: tokenBudgetOptionsForLoop(input),
+      keepRecentMessages: input.contextBudget?.keepRecentMessages ?? DEFAULT_KEEP_RECENT_MESSAGES,
       latestContext,
       workflowState,
       recentActions,
@@ -919,37 +1039,93 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       approvals,
       evidence: workflowEvidenceStore.snapshot(),
       workflowEvaluation: workflowEvaluationForCompaction(lastWorkflowEvaluation, done, blocked),
+      compactor: input.contextCompactor,
+      semanticLlm: input.llm,
+      semanticCompaction: input.semanticCompaction,
+      microCompaction: input.microCompaction,
     })
-    const reason = compactReason(tokenBudget)
-    const compactedMessages = compactedMessageSet(messages, {
-      systemContent: renderSystemContext(latestContext),
-      compactedMessage: compaction.compactedMessage,
-      keepRecentMessages: input.contextBudget?.keepRecentMessages ?? DEFAULT_KEEP_RECENT_MESSAGES,
+    await sessionEvent({
+      type: 'token_budget_updated',
+      turnId,
+      message: 'Token budget updated.',
+      data: {
+        tokenBudget: compaction.tokenBudget,
+        ...(compaction.postMicroTokenBudget ? { postMicroTokenBudget: compaction.postMicroTokenBudget } : {}),
+        ...(compaction.microCompaction?.applied ? { microCompaction: compaction.microCompaction.stats } : {}),
+      },
     })
-    const postCompactionTokenBudget = estimateTokenBudget(compactedMessages, input.contextBudget)
+
+    if (!compaction.fullCompactionApplied) {
+      if (compaction.changed) {
+        messages = compaction.messages
+        ctx.trace.agentTrace?.recordEvent('context_micro_compacted', {
+          turnId,
+          step,
+          reason: compaction.reason,
+          stats: compaction.microCompaction?.stats,
+          tokenBudget: compaction.tokenBudget,
+          postMicroTokenBudget: compaction.postMicroTokenBudget,
+        })
+        await sessionEvent({
+          type: 'context_compacted',
+          turnId,
+          message: `Context micro-compacted: ${compaction.reason ?? 'old tool results were compacted.'}`,
+          data: {
+            mode: 'micro',
+            stats: compaction.microCompaction?.stats,
+            tokenBudget: compaction.tokenBudget,
+            postMicroTokenBudget: compaction.postMicroTokenBudget,
+          },
+        })
+      }
+      return
+    }
+
+    if (!compaction.compaction || !compaction.postCompactionTokenBudget) return
 
     await sessionTranscript({
       type: 'context_compaction',
       turnId,
-      summaryId: compaction.summary.summaryId,
-      reason,
-      tokenBudget,
-      summary: compaction.summary,
+      summaryId: compaction.compaction.summary.summaryId,
+      reason: compaction.reason ?? 'Context compacted.',
+      tokenBudget: compaction.tokenBudget,
+      postCompactionTokenBudget: compaction.postCompactionTokenBudget,
+      mode: compaction.compaction.summary.compactMode ?? 'structured',
+      microCompaction: compaction.microCompaction?.stats,
+      ...(compaction.semanticError ? { semanticError: compaction.semanticError } : {}),
+      summary: compaction.compaction.summary,
+    })
+    ctx.trace.agentTrace?.recordEvent('context_compacted', {
+      turnId,
+      step,
+      reason: compaction.reason,
+      summaryId: compaction.compaction.summary.summaryId,
+      tokenBudget: compaction.tokenBudget,
+      postMicroTokenBudget: compaction.postMicroTokenBudget,
+      postCompactionTokenBudget: compaction.postCompactionTokenBudget,
+      mode: compaction.compaction.summary.compactMode,
+      semanticError: compaction.semanticError,
+      stats: compaction.compaction.stats,
+      microCompaction: compaction.microCompaction?.stats,
     })
     await sessionEvent({
       type: 'context_compacted',
       turnId,
-      message: `Context compacted: ${reason}`,
+      message: `Context compacted: ${compaction.reason}`,
       data: {
-        summaryId: compaction.summary.summaryId,
-        summary: compaction.summary,
-        tokenBudget,
-        postCompactionTokenBudget,
-        stats: compaction.stats,
+        summaryId: compaction.compaction.summary.summaryId,
+        summary: compaction.compaction.summary,
+        tokenBudget: compaction.tokenBudget,
+        postMicroTokenBudget: compaction.postMicroTokenBudget,
+        postCompactionTokenBudget: compaction.postCompactionTokenBudget,
+        mode: compaction.compaction.summary.compactMode,
+        semanticError: compaction.semanticError,
+        stats: compaction.compaction.stats,
+        microCompaction: compaction.microCompaction?.stats,
       },
     })
 
-    messages = compactedMessages
+    messages = compaction.messages
   }
 
   while (step < maxSteps) {
@@ -1230,8 +1406,21 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             approvalId: approval.approvalId,
           },
         })
-        const decision = await gate.confirm(kind, approval.message, approval.context)
-        const resolvedApproval = await resolveApproval(approval, decision, step)
+        const gateResponse = await confirmPermissionGate(gate, kind, approval.message, approval.context, {
+          request: permissionRequest,
+          decision: permissionDecision,
+        })
+        const decision = gateResponse.decision
+        const resolvedApproval = await resolveApproval(approval, decision, step, gateResponse.rememberScope)
+        await rememberPermissionDecision({
+          input,
+          request: permissionRequest,
+          permissionDecision,
+          gateDecision: decision,
+          rememberScope: gateResponse.rememberScope,
+          step,
+          emit,
+        })
         await sessionEvent({
           type: 'human_gate_resolved',
           turnId,
@@ -1446,6 +1635,14 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           ok: false,
           error: message,
         })
+        ctx.trace.agentTrace?.recordEvent('tool_result', {
+          step,
+          turnId,
+          toolName: call.name,
+          toolCallId: call.id,
+          ok: false,
+          error: message,
+        })
         await sessionEvent({
           type: 'tool_failed',
           turnId,
@@ -1465,8 +1662,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       const toolOk = execution?.ok ?? !result.observation.startsWith('FAILED')
       if (call.name === 'plan_form_fill' && toolOk && isFieldPlan(result.data)) {
         ctx.fieldPlan = result.data
-        latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, runMemory, recentActions, blockers)
-        latestContext = await ensureFieldPlan(latestContext)
+        latestContext = await refreshLoopContext(`${call.name} updated field plan.`, step)
         syncFillLedgerSummary(latestContext)
       }
       const fillLedgerUpdate = updateFillLedgerAfterTool(fillLedger, call.name, call.arguments, result, toolOk)
@@ -1497,30 +1693,86 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       })) {
         await recordRunMemorySnapshot(`Run memory updated from ${call.name}.`, step, turnId, call.id)
       }
-      const resultArtifact = maybeWriteToolResultArtifact({
-        trace: ctx.trace.agentTrace,
+      const compactResult = compactToolResult(result)
+      const resultArtifact = await maybeStoreToolResultArtifact({
+        store: toolResultStore,
+        runId: session?.session.runId ?? ctx.trace.runId,
+        sessionId: session?.session.sessionId ?? ctx.sessionId,
+        turnId,
+        workflowPhase: workflowState.phase,
+        riskLevel: risk,
+        policyCode: policyDecision.policyCode,
+        pageUrl: sessionManager.get(ctx.sessionId)?.page.url(),
         toolName: call.name,
         toolCallId: call.id,
         step,
         result,
       })
-      const compactResult = compactToolResult(result)
-      const transcriptResult = attachToolResultArtifact(compactResult, resultArtifact)
       await sessionTranscript({
         type: 'tool_result',
         turnId,
         toolCallId: call.id,
         name: call.name,
         ok: toolOk,
-        result: transcriptResult,
+        result: compactResult,
+        ...(resultArtifact ? { artifacts: [resultArtifact] } : {}),
         ...(!toolOk ? { error: result.observation } : {}),
       })
+      ctx.trace.agentTrace?.recordEvent('tool_result', {
+        step,
+        turnId,
+        toolName: call.name,
+        toolCallId: call.id,
+        ok: toolOk,
+        risk,
+        artifactCount: resultArtifact ? 1 : 0,
+        ...(resultArtifact
+          ? {
+              bytes: resultArtifact.bytes,
+              kind: resultArtifact.kind,
+              sha256: resultArtifact.sha256,
+              artifact: resultArtifact,
+            }
+          : {}),
+        observation: result.observation.slice(0, 500),
+      })
+      if (resultArtifact) {
+        ctx.trace.agentTrace?.recordEvent('tool_result_artifact', {
+          step,
+          turnId,
+          toolName: call.name,
+          toolCallId: call.id,
+          artifactCount: 1,
+          bytes: resultArtifact.bytes,
+          kind: resultArtifact.kind,
+          sha256: resultArtifact.sha256,
+          artifact: resultArtifact,
+        })
+        await sessionEvent({
+          type: 'tool_result_artifact',
+          turnId,
+          toolCallId: call.id,
+          message: `Stored large result artifact for ${call.name}.`,
+          data: {
+            name: call.name,
+            artifactCount: 1,
+            bytes: resultArtifact.bytes,
+            kind: resultArtifact.kind,
+            sha256: resultArtifact.sha256,
+            artifact: resultArtifact,
+          },
+        })
+      }
       await sessionEvent({
         type: toolOk ? 'tool_completed' : 'tool_failed',
         turnId,
         toolCallId: call.id,
         message: `${call.name} ${toolOk ? 'completed' : 'failed'}.`,
-        data: { name: call.name, result: transcriptResult },
+        data: {
+          name: call.name,
+          result: compactResult,
+          ...(resultArtifact ? { artifacts: [resultArtifact] } : {}),
+        },
       })
       const userAnswer = userAnswerFromToolResult(result)
       if (call.name === 'ask_user' && userAnswer) {
@@ -1710,8 +1962,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     }
 
     if (!done) {
-      latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, runMemory, recentActions, blockers)
-      latestContext = await ensureFieldPlan(latestContext)
+      latestContext = await refreshLoopContext('Context refresh updated prompt context.', step)
       syncFillLedgerSummary(latestContext)
       const contextWorkflow = await evaluateWorkflow(step, 'Context refresh updated workflow state.', {
         currentUrl: sessionManager.get(ctx.sessionId)?.page.url(),
@@ -1719,8 +1970,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         form: latestContext.form,
       })
       if (contextWorkflow.changed) {
-        latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, runMemory, recentActions, blockers)
-        latestContext = await ensureFieldPlan(latestContext)
+        latestContext = await refreshLoopContext('Workflow refresh changed prompt context.', step)
         syncFillLedgerSummary(latestContext)
       }
       const handoffSummary = workflowHandoffSummary(workflowState)
@@ -1781,6 +2031,32 @@ function turnIdForStep(step: number): string {
   return `turn_${String(step).padStart(3, '0')}`
 }
 
+function initialMessageSet(
+  latestContext: ContextSnapshot,
+  firstView: string,
+  restoredMessages: ChatMessage[] | undefined,
+): ChatMessage[] {
+  const systemMessage: ChatMessage = { role: 'system', content: renderSystemContext(latestContext) }
+  const currentContextMessage: ChatMessage = { role: 'user', content: renderInitialUserContext(latestContext, firstView) }
+  if (!restoredMessages?.length) return [systemMessage, currentContextMessage]
+
+  const restored = restoredMessages
+    .filter((message) => message.role !== 'system')
+    .filter((message) => !isCompactedRunContextSystemMarker(message))
+  return [
+    systemMessage,
+    ...sanitizeMessageBoundary(restored),
+    currentContextMessage,
+  ]
+}
+
+function tokenBudgetOptionsForLoop(input: AgentLoopInput): TokenBudgetOptions {
+  return {
+    ...input.contextBudget,
+    modelName: input.contextBudget?.modelName ?? input.llm.label,
+  }
+}
+
 function compactReason(tokenBudget: TokenBudgetSnapshot): string {
   const estimated = tokenBudget.estimatedTotalTokens ?? 0
   const threshold = tokenBudget.compactThresholdTokens
@@ -1811,27 +2087,57 @@ function recentMessagesForCompaction(messages: ChatMessage[], keepRecentMessages
   const candidates = messages.filter((message) => (
     message.role !== 'system' && !isCompactedRunContextMessage(message)
   ))
-  return sanitizeRecentMessageTail(candidates.slice(Math.max(0, candidates.length - keep)))
+  return boundedMessageTail(candidates, keep)
 }
 
-function sanitizeRecentMessageTail(messages: ChatMessage[]): ChatMessage[] {
-  let tail = [...messages]
-  while (tail[0]?.role === 'tool') tail = tail.slice(1)
+function boundedMessageTail(messages: ChatMessage[], keepRecentMessages: number): ChatMessage[] {
+  const groups = messageBoundaryGroups(messages)
+  const selected: ChatMessage[][] = []
+  let selectedCount = 0
 
-  while (tail[0]?.role === 'assistant' && tail[0].tool_calls?.length) {
-    const missingToolCallIds = new Set(tail[0].tool_calls.map((toolCall) => toolCall.id))
-    let index = 1
-    while (index < tail.length && tail[index].role === 'tool') {
-      const toolCallId = tail[index].tool_call_id
-      if (toolCallId) missingToolCallIds.delete(toolCallId)
-      index += 1
-    }
-    if (missingToolCallIds.size === 0) break
-    tail = tail.slice(index)
-    while (tail[0]?.role === 'tool') tail = tail.slice(1)
+  for (let index = groups.length - 1; index >= 0 && selectedCount < keepRecentMessages; index -= 1) {
+    selected.unshift(groups[index])
+    selectedCount += groups[index].length
   }
 
-  return tail
+  return sanitizeMessageBoundary(selected.flat())
+}
+
+function sanitizeMessageBoundary(messages: ChatMessage[]): ChatMessage[] {
+  return messageBoundaryGroups(messages).flat()
+}
+
+function messageBoundaryGroups(messages: ChatMessage[]): ChatMessage[][] {
+  const groups: ChatMessage[][] = []
+  let index = 0
+  while (index < messages.length) {
+    const message = messages[index]
+    if (message.role === 'tool') {
+      index += 1
+      continue
+    }
+
+    if (message.role === 'assistant' && message.tool_calls?.length) {
+      const expectedToolCallIds = new Set(message.tool_calls.map((toolCall) => toolCall.id))
+      const group: ChatMessage[] = [message]
+      let cursor = index + 1
+      while (cursor < messages.length && messages[cursor].role === 'tool') {
+        const toolMessage = messages[cursor]
+        if (toolMessage.tool_call_id && expectedToolCallIds.has(toolMessage.tool_call_id)) {
+          group.push(toolMessage)
+          expectedToolCallIds.delete(toolMessage.tool_call_id)
+        }
+        cursor += 1
+      }
+      if (expectedToolCallIds.size === 0) groups.push(group)
+      index = cursor
+      continue
+    }
+
+    groups.push([message])
+    index += 1
+  }
+  return groups
 }
 
 function normalizeKeepRecentMessages(value: number): number {
@@ -1841,6 +2147,39 @@ function normalizeKeepRecentMessages(value: number): number {
 
 function isCompactedRunContextMessage(message: ChatMessage): boolean {
   return message.role === 'user' && message.content.startsWith(COMPACTED_RUN_CONTEXT_PREFIX)
+}
+
+function isCompactedRunContextSystemMarker(message: ChatMessage): boolean {
+  return message.role === 'system' && message.content === 'RESTORED_COMPACTED_RUN_CONTEXT'
+}
+
+function skillContextSessionSignature(context: NonNullable<ContextSnapshot['resolvedSkillContext']>): string {
+  return JSON.stringify({
+    skills: context.skills.map((skill) => ({
+      id: skill.id,
+      source: skill.source,
+      loadMode: skill.loadMode,
+      bodyHash: skill.bodyHash,
+    })),
+    policyHints: context.policyHints.map((hint) => ({
+      id: hint.id,
+      action: hint.action,
+      gateKind: hint.gateKind,
+      invariant: hint.invariant,
+    })),
+    completionCriteria: context.completionCriteria.map((criterion) => ({
+      id: criterion.id,
+      kind: criterion.kind,
+      severity: criterion.severity,
+    })),
+    memoryQueries: context.memoryQueries.map((query) => ({
+      id: query.id,
+      scope: query.scope,
+      topics: query.topics,
+      maxResults: query.maxResults,
+    })),
+    ignoredRelaxations: context.safetyInvariantDigest.ignoredRelaxations,
+  })
 }
 
 function sessionEventTypeForStatus(status: Extract<AgentSessionStatus, 'completed' | 'blocked' | 'failed' | 'aborted'>) {
@@ -1967,13 +2306,14 @@ function intendedValueFrom(value: unknown): string | string[] | null | undefined
   return undefined
 }
 
-function buildLoopContextWithWorkflow(
+async function buildLoopContextWithWorkflow(
   input: AgentLoopInput,
   workflowState: WorkflowState,
   runMemory: RunMemory,
   recentActions: ContextRecentAction[],
   blockers: string[],
 ) {
+  const relevantMemories = await relevantMemoriesFor(input)
   return buildLoopContext(
     {
       goal: input.goal,
@@ -1984,6 +2324,7 @@ function buildLoopContextWithWorkflow(
       safetyMode: input.safetyMode,
       workflowState,
       runMemory: compactRunMemory(runMemory),
+      relevantMemories,
       fieldPlan: input.ctx.fieldPlan ?? input.fieldPlan,
       fillLedgerSummary: input.ctx.fillLedgerSummary ?? input.fillLedgerSummary ?? workflowState.fillLedgerSummary,
       answerSummary: summarizeAnswerStore(input.ctx.answerStore),
@@ -2036,6 +2377,36 @@ function summarizeAnswerStore(answerStore: ToolContext['answerStore']): string |
       return `- field=${compactAnswerText(answer.field)} | answer=${compactAnswerText(answer.answer)} | source=${answer.source}${options} | at=${answer.at}`
     })
     .join('\n')
+}
+
+async function relevantMemoriesFor(input: AgentLoopInput): Promise<string | undefined> {
+  if (!input.memdir?.path) return undefined
+  try {
+    await ensureMemdir(input.memdir.path)
+    const result = await queryMemdir(input.memdir.path, {
+      schemaVersion: 'memory-query/v1',
+      runId: input.ctx.trace.runId,
+      sessionId: input.ctx.sessionId,
+      scope: ['session', 'project', 'user'],
+      kinds: ['user_answer', 'site_fact', 'semantic_note', 'failure_pattern', 'skill_note'],
+      topics: input.goal.split(/\s+/).filter((word) => word.length >= 4).slice(0, 8),
+      urlOrigin: originForUrl(sessionManager.get(input.ctx.sessionId)?.page.url()),
+      maxResults: 5,
+      includeSensitive: false,
+    })
+    return renderMemorySearchResult(result)
+  } catch {
+    return undefined
+  }
+}
+
+function originForUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined
+  try {
+    return new URL(url).origin
+  } catch {
+    return undefined
+  }
 }
 
 function toolResultReusedSavedAnswer(result: unknown): boolean {
@@ -2269,6 +2640,67 @@ function approvalInputFor(request: PermissionRequest, decision: PermissionDecisi
   }
 }
 
+async function confirmPermissionGate(
+  gate: HumanGate,
+  kind: GateKind,
+  message: string,
+  context: Parameters<HumanGate['confirm']>[2],
+  permission: { request: PermissionRequest; decision: PermissionDecision },
+): Promise<PermissionGateResponse> {
+  const rememberingGate = gate as RememberingHumanGate
+  const response = rememberingGate.confirmPermission
+    ? await rememberingGate.confirmPermission(kind, message, context, permission)
+    : await gate.confirm(kind, message, context)
+  if (typeof response === 'string') return { decision: response }
+  return response
+}
+
+async function rememberPermissionDecision(input: {
+  input: AgentLoopInput
+  request: PermissionRequest
+  permissionDecision: PermissionDecision
+  gateDecision: GateDecision
+  rememberScope?: Extract<PermissionRememberScope, 'session' | 'always'>
+  step: number
+  emit: (level: AgentEvent['level'], message: string, step: number) => void
+}): Promise<void> {
+  if (!input.input.persistentPermissionRules?.path) return
+  if (input.gateDecision !== 'approve') return
+  if (!input.rememberScope) return
+  if (!input.permissionDecision.remember.supportedScopes.includes(input.rememberScope)) return
+
+  const rule = persistentPermissionRuleFromDecision({
+    id: rememberedPermissionRuleId(input.request, input.rememberScope),
+    decision: {
+      ...input.permissionDecision,
+      action: 'allow',
+      source: 'user',
+      reason: `Remembered human approval (${input.rememberScope}) for this non-final high-risk action.`,
+    },
+    request: input.request,
+    rememberScope: input.rememberScope,
+  })
+  if (!rule) return
+
+  try {
+    await appendPersistentPermissionRule(input.input.persistentPermissionRules.path, rule)
+    input.emit('decision', `Remembered permission (${input.rememberScope}) for ${permissionSubjectLabel(input.request)}.`, input.step)
+  } catch (error) {
+    input.emit('warn', `Permission remember write failed: ${error instanceof Error ? error.message : String(error)}`, input.step)
+  }
+}
+
+function rememberedPermissionRuleId(
+  request: PermissionRequest,
+  scope: Extract<PermissionRememberScope, 'session' | 'always'>,
+): string {
+  const subject = request.subject.kind === 'tool_call'
+    ? request.subject.toolName
+    : `workflow_${request.subject.handoffKind}`
+  const origin = originForUrl(request.currentUrl) ?? 'any-origin'
+  return `remember_${scope}_${safeArtifactName(subject)}_${safeArtifactName(request.policy.policyCode)}_${safeArtifactName(origin)}`
+}
+
 function approvalIdFor(request: PermissionRequest): string {
   return request.requestId.replace(/^perm_/, 'appr_')
 }
@@ -2377,57 +2809,46 @@ function toolMessage(toolCallId: string, content: string): ChatMessage {
   return { role: 'tool', tool_call_id: toolCallId, content }
 }
 
-interface ToolResultArtifactRef {
-  path: string
-  originalBytes: number
-}
-
 const TOOL_RESULT_ARTIFACT_THRESHOLD_BYTES = 12 * 1024
 const TOOL_MESSAGE_OBSERVATION_CHARS = 6000
 
-function maybeWriteToolResultArtifact(input: {
-  trace?: { writeArtifact(name: string, content: string | Buffer): string; recordEvent(event: string, data?: unknown): void }
+async function maybeStoreToolResultArtifact(input: {
+  store: ToolResultStore
+  runId: string
+  sessionId: string
+  turnId: string
+  workflowPhase?: string
+  riskLevel?: RiskLevel
+  policyCode?: string
+  pageUrl?: string
   toolName: string
   toolCallId: string
   step: number
   result: unknown
-}): ToolResultArtifactRef | undefined {
+}): Promise<ToolResultArtifactRef | undefined> {
   const content = stringifyPretty(input.result)
   const originalBytes = Buffer.byteLength(content, 'utf8')
-  if (!input.trace || originalBytes <= TOOL_RESULT_ARTIFACT_THRESHOLD_BYTES) return undefined
+  if (originalBytes <= TOOL_RESULT_ARTIFACT_THRESHOLD_BYTES) return undefined
 
-  const name = `tool-result-step-${String(input.step).padStart(3, '0')}-${safeArtifactName(input.toolName)}-${safeArtifactName(input.toolCallId)}.json`
-  const path = input.trace.writeArtifact(name, `${content}\n`)
-  input.trace.recordEvent('tool_result_artifact', {
-    path,
-    toolName: input.toolName,
+  const ref = await input.store.write({
+    runId: input.runId,
+    sessionId: input.sessionId,
     toolCallId: input.toolCallId,
-    step: input.step,
-    originalBytes,
-  })
-  return { path, originalBytes }
-}
-
-function attachToolResultArtifact(result: unknown, artifact: ToolResultArtifactRef | undefined): unknown {
-  if (!artifact) return result
-  if (result && typeof result === 'object' && !Array.isArray(result)) {
-    return {
-      ...result,
-      artifact: {
-        kind: 'persisted_tool_result',
-        path: artifact.path,
-        originalBytes: artifact.originalBytes,
-      },
-    }
-  }
-  return {
-    value: result,
-    artifact: {
-      kind: 'persisted_tool_result',
-      path: artifact.path,
-      originalBytes: artifact.originalBytes,
+    toolName: input.toolName,
+    kind: toolResultArtifactKind(input.toolName, input.result),
+    content: input.result,
+    sensitivity: toolResultArtifactSensitivity(input.toolName, content),
+    retention: { scope: 'run', deleteWithSession: true },
+    summary: toolResultArtifactSummary(input.toolName, input.result),
+    metadata: {
+      pageUrl: input.pageUrl,
+      workflowPhase: input.workflowPhase,
+      riskLevel: input.riskLevel,
+      policyCode: input.policyCode,
     },
-  }
+  })
+  await input.store.read(ref)
+  return ref
 }
 
 function toolMessageContentWithArtifact(observation: string, artifact: ToolResultArtifactRef | undefined): string {
@@ -2436,8 +2857,35 @@ function toolMessageContentWithArtifact(observation: string, artifact: ToolResul
   return [
     visible,
     '',
-    `<persisted_tool_result path="${artifact.path}" originalBytes="${artifact.originalBytes}" />`,
+    `<tool_result_artifact_ref artifactId="${artifact.artifactId}" kind="${artifact.kind}" bytes="${artifact.bytes}" sha256="${artifact.sha256}" />`,
   ].join('\n')
+}
+
+function toolResultArtifactKind(toolName: string, result: unknown): ToolResultArtifactKind {
+  const normalized = toolName.toLowerCase()
+  if (normalized.includes('screenshot')) return 'browser_screenshot'
+  if (normalized.includes('snapshot') || normalized.includes('form')) return 'page_snapshot'
+  if (normalized.includes('resume_query')) return 'resume_query'
+  if (normalized.includes('network')) return 'network_log'
+  if (typeof result === 'string') return 'text'
+  return 'generic_json'
+}
+
+function toolResultArtifactSensitivity(toolName: string, content: string): ToolResultArtifactSensitivity {
+  const normalized = toolName.toLowerCase()
+  if (/(password|cookie|token|secret|authorization|storage[_-]?state)/i.test(content)) return 'secret'
+  if (/(resume|profile|ask_user|upload|set_field|browser_type|form|snapshot)/i.test(normalized)) return 'personal'
+  return 'internal'
+}
+
+function toolResultArtifactSummary(toolName: string, result: unknown): string {
+  if (result && typeof result === 'object') {
+    const observation = (result as { observation?: unknown }).observation
+    if (typeof observation === 'string' && observation.trim()) {
+      return `${toolName}: ${observation.replace(/\s+/g, ' ').trim().slice(0, 240)}`
+    }
+  }
+  return `${toolName}: large tool result stored outside the prompt context.`
 }
 
 function stringifyPretty(value: unknown): string {

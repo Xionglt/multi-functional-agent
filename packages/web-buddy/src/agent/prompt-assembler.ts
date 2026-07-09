@@ -9,6 +9,7 @@ import {
   USER_PROMPT_SECTION_IDS,
 } from '../context/prompt-sections.js'
 import type { ContextRecentAction, ContextSnapshot, PromptSection } from '../context/types.js'
+import { loadSkills, resolveSkills, renderSkillPromptSection } from '../skills/index.js'
 import { createDefaultTaskState } from '../task/task-state.js'
 import type { AgentSafetyMode, PromptAssemblerInput } from './types.js'
 
@@ -24,15 +25,12 @@ export function safetyNotesFor(mode: AgentSafetyMode = 'guarded'): string[] {
     ]
   }
 
-  return [
-    'NEVER submit a final application. If you reach the final submit/确认投递/提交申请 button on an application form, do NOT click it; call agent_done with blocked=true.',
-    'It is OK to click a job-detail entry button such as 投递简历/Apply only when it merely opens the login/application flow and does not send the completed application.',
-    'On Alibaba position-detail pages, if a small checkbox says 申请此职位表明您已阅读并同意 / 申请工作需知 next to 投递简历, check that box before clicking 投递简历. This is an application-entry precondition, not permission to click a true final submit button later.',
-    'For any element marked risk=L3 or risk=L4, the human must approve before the action runs; you may still request it because the system gates it.',
-    'If you hit a login wall or captcha you cannot pass, call agent_done with blocked=true and explain.',
-    'Fill fields from FILL_PLAN first. When a field cannot be mapped, call resume_query for the full resume section or ask_user for missing information before leaving it blank; only leave a field untouched when no resume, derived, or user-answer source exists.',
-    'If the task context provides a current resume file path, an existing on-site resume is NOT sufficient by itself. Prefer uploading the current resume file first, through browser_upload_file, before continuing the application flow unless the human explicitly says to reuse the existing on-site resume.',
-  ]
+  return renderSkillPromptSection(resolveSkills(loadSkills(), {
+    runId: 'compat-safety-notes',
+    sessionId: 'compat-safety-notes',
+    goal: '',
+    safetyMode: mode,
+  }), 'SAFETY_RULES')
 }
 
 export class PromptAssembler {
@@ -44,22 +42,39 @@ export class PromptAssembler {
     blockers: string[],
   ): Promise<ContextSnapshot> {
     const updatedAt = new Date().toISOString()
-    return contextManager.createSnapshot({
+    const snapshot = await contextManager.createSnapshot({
       sessionId: input.ctx.sessionId,
       goal: input.goal,
       resumeSummary: summarizeResumeProfile(input.resume),
       recentActions,
-      safetyNotes: safetyNotesFor(input.safetyMode ?? 'guarded'),
       blockers,
       extraContext: input.extraContext,
       taskState: input.taskState ?? createDefaultTaskState({ goal: input.goal, updatedAt }),
       workflowState: input.workflowState,
       runMemory: input.runMemory,
+      relevantMemories: input.relevantMemories,
       fieldPlan: input.fieldPlan,
       fillLedgerSummary: input.fillLedgerSummary,
       answerSummary: input.answerSummary,
       updatedAt,
     })
+    const resolvedSkillContext = resolveSkills(loadSkills(), {
+      runId: process.env.AGENT_RUN_ID || input.ctx.sessionId,
+      sessionId: input.ctx.sessionId,
+      goal: input.goal,
+      taskType: input.taskType,
+      safetyMode: input.safetyMode ?? 'guarded',
+      url: snapshot.page?.url,
+      workflowPhase: snapshot.workflowState?.phase,
+      now: new Date(updatedAt),
+    })
+    snapshot.resolvedSkillContext = resolvedSkillContext
+    snapshot.safetyNotes = [
+      ...renderSkillPromptSection(resolvedSkillContext, 'SAFETY_RULES'),
+      ...safetyNotesFor(input.safetyMode ?? 'guarded').filter((note) => input.safetyMode === 'raw'),
+    ]
+    recordSkillResolution(snapshot)
+    return snapshot
   }
 
   renderSystemContext(snapshot: ContextSnapshot): string {
@@ -143,4 +158,27 @@ function recordContextSelection(
     sectionIds: sections.map((section) => section.id),
     ...metrics,
   })
+}
+
+function recordSkillResolution(snapshot: ContextSnapshot): void {
+  const trace = getActiveTrace()
+  const context = snapshot.resolvedSkillContext
+  if (!trace || !context) return
+  const artifactPath = trace.writeArtifact('resolved-skills.json', JSON.stringify(context, null, 2))
+  trace.recordEvent('skill_resolution', {
+    schemaVersion: 'skill-resolution-event/v1',
+    sessionId: snapshot.sessionId,
+    skillHits: context.skills.length,
+    skills: context.skills,
+    artifactPath,
+  })
+  for (const skill of context.skills) {
+    const span = trace.startSpan({
+      spanType: 'skill_call',
+      name: 'skill.resolve',
+      skillName: skill.id,
+      input: { reason: skill.reason, source: skill.source },
+    })
+    span.end({ status: 'success', output: { loadMode: skill.loadMode, bodyHash: skill.bodyHash } })
+  }
 }

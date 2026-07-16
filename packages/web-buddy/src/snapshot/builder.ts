@@ -6,6 +6,7 @@ const INTERACTIVE_SELECTOR =
   'a[href], button, input, select, textarea, [role="button"], [role="link"], [role="textbox"], [role="combobox"], [role="searchbox"], [role="checkbox"], [role="radio"], [role="menuitem"], summary'
 
 const DEFAULT_MAX_ELEMENTS = 80
+const DEFAULT_TEXT_SUMMARY_CHARS = 4000
 
 function hashText(value: string): string {
   let hash = 0
@@ -16,7 +17,7 @@ function hashText(value: string): string {
   return `h${Math.abs(hash)}`
 }
 
-function summarizeText(text: string, max = 240): string {
+function summarizeText(text: string, max = DEFAULT_TEXT_SUMMARY_CHARS): string {
   const normalized = text.replace(/\s+/g, ' ').trim()
   if (normalized.length <= max) return normalized
   return `${normalized.slice(0, max)}...`

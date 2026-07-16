@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '../../..')
-const logPath = resolve(repoRoot, 'PLAN/runtime-rewrite/delivery-comparison-log.md')
+const logPath = resolve(repoRoot, 'output/delivery-comparison-log.md')
 
 function argValue(name) {
   const index = process.argv.indexOf(name)

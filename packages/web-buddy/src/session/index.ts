@@ -5,6 +5,7 @@ export type {
   AgentSessionStatus,
   ApprovalDecisionEntry,
   ApprovalRequestEntry,
+  AsyncTaskNotificationAttachmentEntry,
   AssistantMessageEntry,
   CompletionGateEntry,
   ContextCompactionEntry,

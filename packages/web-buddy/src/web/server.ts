@@ -24,6 +24,7 @@ import { defaultAuthPath } from '../runtime/local/login.js'
 import { RISK_DECISIONS_ARTIFACT } from '../policy/risk-decisions.js'
 import type { WebBuddyTaskType } from '../workflow/completion-gate.js'
 import INDEX_HTML from './public/index.html'
+import VENUE_BOOKING_HTML from './public/venue-booking.html'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..')
@@ -280,6 +281,9 @@ async function startRuntimeRun(opts: {
   runtimeRuns.set(id, run)
 
   const preset = opts.preset || 'generic'
+  const targetHost = new URL(opts.url).hostname.toLowerCase()
+  const allowedDomains = opts.allowedDomains?.trim() || targetHost
+  const localTarget = targetHost === 'localhost' || targetHost === '127.0.0.1' || targetHost === '::1'
   const script = join(PACKAGE_ROOT, 'scripts', 'adapters', 'claude-code', 'alibaba-apply.mjs')
   const args = [
     script,
@@ -299,10 +303,11 @@ async function startRuntimeRun(opts: {
   else args.push('--headful')
   if (opts.maxTurns) args.push('--max-turns', opts.maxTurns)
   if (opts.maxPasses) args.push('--max-passes', opts.maxPasses)
-  if (opts.allowedDomains) args.push('--allowed-domains', opts.allowedDomains)
+  if (allowedDomains) args.push('--allowed-domains', allowedDomains)
 
   const cfg = mergeConfig(loadConfig())
   const env = { ...process.env }
+  if (localTarget) env.PLAYWRIGHT_BLOCK_LOCALHOST = 'false'
   if (cfg.model.name) env.ANTHROPIC_MODEL = cfg.model.name
   if (cfg.model.baseUrl) env.ANTHROPIC_BASE_URL = cfg.model.baseUrl
   const key = cfg.model.authToken || cfg.model.apiKey
@@ -497,6 +502,11 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
   if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
     res.writeHead(200, { 'content-type': MIME['.html'] })
     res.end(INDEX_HTML)
+    return
+  }
+  if (req.method === 'GET' && (p === '/fixtures/venue-booking' || p === '/fixtures/venue-booking/')) {
+    res.writeHead(200, { 'content-type': MIME['.html'], 'cache-control': 'no-store' })
+    res.end(VENUE_BOOKING_HTML)
     return
   }
 

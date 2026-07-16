@@ -20,8 +20,6 @@ execute; `PermissionEngine` maps policy to allow/ask/deny according to
 Trace, metrics, and `safety-report.json` are diagnostic artifacts, not runtime
 state sources.
 
-Full model: [../../docs/safety-model.md](../../docs/safety-model.md).
-
 ## Quickstart
 
 ```bash
@@ -33,6 +31,9 @@ npm run demo:form
 
 # Local read-only web research. No key, login, or network.
 npm run demo:research
+
+# Web console. Select the Venue scenario for a non-resume, multi-step test.
+npm run web
 
 # Generate safety-report.json for the latest trace.
 npm run report:safety
@@ -47,6 +48,7 @@ npm run test:mvp
 | --- | --- | --- |
 | `npm run demo:form` | Local form observation, resume-based filling, submit-adjacent gate behavior. | Offline fixture; never contacts a real site. |
 | `npm run demo:research` | Read-only page observation, structured summary artifact, trace, metrics, safety report. | Offline fixture; no login, no form submit, no L3/L4 action. |
+| Web console → `Venue` | Compare five venues, choose the only fully compliant option, fill a booking draft, and stop before payment. | Local fixture; uses fake contact data and must leave the payment boundary untouched. |
 | `npm run demo:match` | Read-only Alibaba multi-page list/detail matching for the flagship workflow. | Threshold-gated; does not final-submit. |
 | `npm run alibaba:apply` | Complex flagship workflow through the optional Claude Code adapter. | Requires model and human handoff for login/captcha/final submit. |
 

@@ -1,4 +1,25 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import type {
+  ActionBinding,
+  AgentTask as AgentTaskV2,
+  AgentTaskEvent,
+  AgentTaskGraphSafety as AgentTaskGraphSafetyV2,
+  AgentTaskGraphV2,
+  AgentTaskInput as AgentTaskInputV2,
+  TaskCompletionRequirement,
+  TaskIdempotency,
+  TaskSpawnResolutionV1,
+  AgentTaskGraphV1MigrationOptions,
+  ContractMigrationResult,
+  ContractMigrationWarning,
+  LegacyAgentTaskGraphV1MigrationInput,
+} from './async-task-contracts.js'
+
+export type {
+  AgentTaskEvent,
+  AgentTaskGraphV2,
+  TaskRunIdentity,
+} from './async-task-contracts.js'
 
 export type AgentTaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'killed' | 'blocked'
 
@@ -578,3 +599,371 @@ function uniqueIds(values: string[], selfId?: string): string[] {
 function isAgentTask(value: AgentTask | CreateAgentTaskInput): value is AgentTask {
   return 'createdAt' in value && 'updatedAt' in value && 'requiresMainWorkflowVerification' in value
 }
+
+// V2 control-plane reducers. The legacy helpers above remain until A10 switches the
+// synchronous runtime pilot; Store/Scheduler only consume these frozen V2 shapes.
+
+export interface CreateAgentTaskGraphV2Input {
+  graphId?: string
+  runId: string
+  sessionId: string
+  currentActionSeq?: number
+  now?: string
+}
+
+export interface CreateAgentTaskV2Input {
+  id?: string
+  kind: AgentTaskV2['kind']
+  title: string
+  priority?: number
+  blockedBy?: string[]
+  blocks?: string[]
+  inputs?: AgentTaskInputV2[]
+  actionBinding?: ActionBinding
+  idempotency: TaskIdempotency
+  completionRequirement?: TaskCompletionRequirement
+  maxAttempts?: number
+  timeoutMs?: number
+  leaseDurationMs?: number
+  now?: string
+}
+
+export function createAgentTaskGraphV2(input: CreateAgentTaskGraphV2Input): AgentTaskGraphV2 {
+  const now = input.now ?? new Date().toISOString()
+  return {
+    schemaVersion: 'agent-task-graph/v2',
+    revision: 0,
+    nextEventSeq: 1,
+    graphId: input.graphId ?? `graph_${randomUUID()}`,
+    runId: input.runId,
+    sessionId: input.sessionId,
+    createdAt: now,
+    updatedAt: now,
+    owner: 'runtime_orchestrator',
+    actionClock: {
+      schemaVersion: 'browser-action-clock/v1',
+      sessionId: input.sessionId,
+      runId: input.runId,
+      currentActionSeq: input.currentActionSeq ?? 0,
+      updatedAt: now,
+      authority: 'main_agent_runtime',
+    },
+    tasks: [],
+    locks: [],
+    notificationOutbox: [],
+    safety: defaultAgentTaskGraphSafetyV2(),
+  }
+}
+
+export function defaultAgentTaskGraphSafetyV2(): AgentTaskGraphSafetyV2 {
+  return {
+    browserWriteOwnership: { owner: 'main_agent_runtime' },
+    subagentCapabilityPolicy: 'immutable_artifact_read_only',
+    subagentDefaultAccessMode: 'read_only',
+    allowedReadOnlyTaskKinds: ['candidate_job_research', 'trace_summarization', 'memory_retrieval'],
+    allowedReadOnlyTools: ['artifact_read_text', 'artifact_read_json', 'artifact_search_text', 'artifact_list_refs'],
+    disallowedSubagentGateKinds: ['login', 'captcha', 'upload_resume', 'save_resume', 'final_submit'],
+    disallowedSubagentToolNames: [
+      'browser_open',
+      'browser_click',
+      'browser_click_text',
+      'browser_type',
+      'browser_fill_by_label',
+      'browser_select',
+      'browser_select_by_text',
+      'browser_set_field',
+      'browser_press_key',
+      'browser_upload_file',
+      'agent_done',
+      'ask_user',
+    ],
+    finalDecisionOwner: 'main_agent_runtime',
+    completionEvidenceRequiresMainVerification: true,
+  }
+}
+
+export function createAgentTaskV2(input: CreateAgentTaskV2Input): AgentTaskV2 {
+  const now = input.now ?? new Date().toISOString()
+  const blockedBy = uniqueIds(input.blockedBy ?? [], input.id)
+  const blocks = uniqueIds(input.blocks ?? [], input.id)
+  const role = roleForV2Kind(input.kind)
+  const completion = input.completionRequirement ?? { requiredForCompletion: false, terminalPolicy: 'does_not_block' }
+  const core = {
+    schemaVersion: 'agent-task/v2' as const,
+    id: input.id ?? `task_${randomUUID()}`,
+    title: input.title,
+    priority: input.priority ?? 0,
+    blockedBy,
+    blocks,
+    inputs: structuredClone(input.inputs ?? []),
+    outputs: [],
+    attempts: [],
+    actionBinding: structuredClone(input.actionBinding ?? { kind: 'not_action_bound' }),
+    idempotency: structuredClone(input.idempotency),
+    attempt: 0,
+    maxAttempts: input.maxAttempts ?? 2,
+    timeoutMs: input.timeoutMs ?? 120_000,
+    leaseDurationMs: input.leaseDurationMs ?? 150_000,
+    createdAt: now,
+    updatedAt: now,
+    requiresMainWorkflowVerification: true as const,
+    authoritativeCompletionEvidence: false as const,
+  }
+  if (blockedBy.length > 0) {
+    return {
+      ...core,
+      ...role,
+      ...completion,
+      status: 'blocked',
+      blockReason: { kind: 'dependency_wait', unresolvedTaskIds: [...blockedBy] },
+    } as AgentTaskV2
+  }
+  return { ...core, ...role, ...completion, status: 'pending' } as AgentTaskV2
+}
+
+export function addAgentTaskV2(graph: AgentTaskGraphV2, task: AgentTaskV2): AgentTaskGraphV2 {
+  if (graph.tasks.some((candidate) => candidate.id === task.id)) throw graphV2Error('IDEMPOTENCY_CONFLICT', `Task already exists: ${task.id}`)
+  const sameKey = graph.tasks.find((candidate) => candidate.idempotency.key === task.idempotency.key)
+  if (sameKey) {
+    throw graphV2Error(
+      sameKey.idempotency.inputDigest === task.idempotency.inputDigest ? 'IDEMPOTENCY_CONFLICT' : 'IDEMPOTENCY_CONFLICT',
+      `Idempotency key ${task.idempotency.key} is already used by ${sameKey.id}.`,
+    )
+  }
+  const known = new Set(graph.tasks.map((candidate) => candidate.id))
+  const unknown = [...task.blockedBy, ...task.blocks].filter((id) => !known.has(id))
+  if (unknown.length) throw graphV2Error('DEPENDENCY_UNRESOLVED', `Task ${task.id} references unknown task(s): ${uniqueIds(unknown).join(', ')}`)
+  const tasks = syncTaskLinksV2([...graph.tasks.map(cloneV2), cloneV2(task)])
+  assertAcyclicTaskGraphV2(tasks)
+  return { ...cloneV2(graph), tasks }
+}
+
+export function resolveAgentTaskSpawnV2(graph: AgentTaskGraphV2, task: AgentTaskV2): TaskSpawnResolutionV1 {
+  const existing = graph.tasks.find((candidate) => candidate.idempotency.key === task.idempotency.key)
+  if (!existing) return { schemaVersion: 'task-spawn-resolution/v1', outcome: 'created', task: cloneV2(task) }
+  if (existing.idempotency.inputDigest === task.idempotency.inputDigest) {
+    return { schemaVersion: 'task-spawn-resolution/v1', outcome: 'existing_same_digest', task: cloneV2(existing) }
+  }
+  return {
+    schemaVersion: 'task-spawn-resolution/v1',
+    outcome: 'conflict',
+    error: {
+      schemaVersion: 'async-task-contract-error/v1',
+      code: 'IDEMPOTENCY_CONFLICT',
+      category: 'conflict',
+      retryDisposition: 'new_task_required',
+      message: `Idempotency key ${task.idempotency.key} was reused with a different input digest.`,
+      occurredAt: new Date().toISOString(),
+      taskId: existing.id,
+    },
+  }
+}
+
+export function migrateAgentTaskGraphV1(
+  input: LegacyAgentTaskGraphV1MigrationInput,
+  options: AgentTaskGraphV1MigrationOptions,
+): ContractMigrationResult<AgentTaskGraphV2> {
+  if ((input as { schemaVersion?: string }).schemaVersion !== 'agent-task-graph/v1') {
+    return {
+      status: 'rejected',
+      error: {
+        schemaVersion: 'async-task-contract-error/v1',
+        code: 'UNSUPPORTED_SCHEMA_VERSION',
+        category: 'validation',
+        retryDisposition: 'never_retry',
+        message: `Cannot migrate schema ${(input as { schemaVersion?: string }).schemaVersion ?? 'unknown'}.`,
+        occurredAt: options.migratedAt,
+      },
+    }
+  }
+  if (input.tasks.some((task) => isTerminalStatusV2(task.status) && task.outputs.length > 0)) {
+    return {
+      status: 'rebuild_required',
+      reason: 'Legacy terminal outputs lack verified immutable artifact metadata.',
+      warnings: [],
+    }
+  }
+
+  const warnings: ContractMigrationWarning[] = []
+  const tasks = input.tasks.map((legacy): AgentTaskV2 => {
+    const idempotency: TaskIdempotency = {
+      schemaVersion: 'agent-task-idempotency/v1',
+      scope: 'session',
+      key: `legacy:${input.graphId}:${legacy.id}`,
+      canonicalization: 'web-buddy-task-input-jcs/v1',
+      digestAlgorithm: 'sha256',
+      inputDigest: createHash('sha256').update(canonicalJson(legacy.inputs)).digest('hex'),
+    }
+    warnings.push({ code: 'LEGACY_IDEMPOTENCY_DERIVED', message: `Derived idempotency for legacy task ${legacy.id}.` })
+    warnings.push({ code: 'LEGACY_ACTION_BINDING_UNKNOWN', message: `Legacy task ${legacy.id} is not action-bound.` })
+    const base = createAgentTaskV2({
+      id: legacy.id,
+      kind: legacy.kind,
+      title: `Legacy task ${legacy.id}`,
+      inputs: legacy.inputs.map((structuredValue) => ({ kind: 'goal', structuredValue })),
+      idempotency,
+      maxAttempts: options.defaultMaxAttempts,
+      timeoutMs: options.defaultTimeoutMs,
+      leaseDurationMs: options.defaultLeaseDurationMs,
+      now: input.updatedAt,
+    })
+    if (legacy.status === 'running') {
+      if (legacy.accessMode === 'browser_write') {
+        const error = migrationPolicyError(legacy.id, options.migratedAt)
+        warnings.push({ code: 'LEGACY_RUNNING_BROWSER_WRITE_FAILED', message: `Legacy browser-write task ${legacy.id} was failed.` })
+        return {
+          ...base,
+          status: 'failed',
+          terminalAt: options.migratedAt,
+          updatedAt: options.migratedAt,
+          lastError: error,
+        } as AgentTaskV2
+      }
+      warnings.push({ code: 'LEGACY_RUNNING_READ_ONLY_REQUEUED', message: `Legacy read-only task ${legacy.id} was requeued.` })
+      return { ...base, status: 'pending', updatedAt: options.migratedAt } as AgentTaskV2
+    }
+    if (legacy.status === 'blocked') {
+      return {
+        ...base,
+        status: 'blocked',
+        blockReason: { kind: 'manual', code: 'legacy_blocked', reason: 'Preserved from legacy graph.' },
+      } as AgentTaskV2
+    }
+    if (legacy.status === 'completed' || legacy.status === 'failed' || legacy.status === 'killed') {
+      return { ...base, status: legacy.status, terminalAt: input.updatedAt } as AgentTaskV2
+    }
+    return { ...base, status: 'pending' } as AgentTaskV2
+  })
+  const runningIds = new Set(input.tasks.filter((task) => task.status === 'running').map((task) => task.id))
+  const graph: AgentTaskGraphV2 = {
+    ...createAgentTaskGraphV2({
+      graphId: input.graphId,
+      runId: input.runId,
+      sessionId: input.sessionId,
+      now: options.migratedAt,
+    }),
+    createdAt: input.createdAt,
+    tasks,
+    locks: input.locks.map((lock) => runningIds.has(lock.ownerTaskId) && !lock.releasedAt
+      ? { ...lock, releasedAt: options.migratedAt }
+      : structuredClone(lock)),
+  }
+  return { status: 'migrated', value: graph, warnings }
+}
+
+export function getAgentTaskV2(graph: AgentTaskGraphV2, taskId: string): AgentTaskV2 | undefined {
+  const task = graph.tasks.find((candidate) => candidate.id === taskId)
+  return task ? cloneV2(task) : undefined
+}
+
+export function getRunnableAgentTasksV2(graph: AgentTaskGraphV2, now = new Date().toISOString()): AgentTaskV2[] {
+  return graph.tasks
+    .filter((task) => task.status === 'pending'
+      && (!task.nextAttemptAt || task.nextAttemptAt <= now)
+      && task.blockedBy.every((id) => graph.tasks.find((candidate) => candidate.id === id)?.status === 'completed'))
+    .sort((left, right) => right.priority - left.priority || left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+    .map(cloneV2)
+}
+
+export function finalizeAgentTaskGraphMutationV2(
+  current: AgentTaskGraphV2,
+  draft: AgentTaskGraphV2,
+  event: AgentTaskEvent,
+  now = event.occurredAt,
+): { graph: AgentTaskGraphV2; event: AgentTaskEvent } {
+  const revisionAfter = current.revision + 1
+  const graph: AgentTaskGraphV2 = {
+    ...cloneV2(draft),
+    graphId: current.graphId,
+    runId: current.runId,
+    sessionId: current.sessionId,
+    revision: revisionAfter,
+    nextEventSeq: current.nextEventSeq + 1,
+    updatedAt: now,
+  }
+  const finalized = {
+    ...cloneV2(event),
+    eventSeq: current.nextEventSeq,
+    revisionBefore: current.revision,
+    revisionAfter,
+    sessionId: current.sessionId,
+    graphId: current.graphId,
+    occurredAt: now,
+    authoritativeTaskState: true as const,
+    authoritativeCompletionEvidence: false as const,
+  } as AgentTaskEvent
+  return { graph, event: finalized }
+}
+
+export function assertAcyclicTaskGraphV2(tasksOrGraph: AgentTaskV2[] | AgentTaskGraphV2): void {
+  const tasks = Array.isArray(tasksOrGraph) ? tasksOrGraph : tasksOrGraph.tasks
+  const byId = new Map(tasks.map((task) => [task.id, task]))
+  const visiting = new Set<string>()
+  const visited = new Set<string>()
+  const visit = (taskId: string, path: string[]): void => {
+    if (visited.has(taskId)) return
+    if (visiting.has(taskId)) throw graphV2Error('DAG_CYCLE', `Task graph contains a cycle: ${[...path, taskId].join(' -> ')}`)
+    const task = byId.get(taskId)
+    if (!task) return
+    visiting.add(taskId)
+    for (const downstream of task.blocks) visit(downstream, [...path, taskId])
+    visiting.delete(taskId)
+    visited.add(taskId)
+  }
+  for (const task of tasks) visit(task.id, [])
+}
+
+function roleForV2Kind(kind: AgentTaskV2['kind']): Pick<AgentTaskV2, 'kind' | 'accessMode' | 'capacityClass'> {
+  if (kind === 'main_browser_step') return { kind, accessMode: 'browser_write', capacityClass: 'main_agent_only' }
+  if (kind === 'candidate_job_research' || kind === 'trace_summarization') {
+    return { kind, accessMode: 'read_only', capacityClass: 'read_only_llm' }
+  }
+  if (kind === 'memory_retrieval') return { kind, accessMode: 'read_only', capacityClass: 'deterministic' }
+  return { kind, accessMode: 'analysis_only', capacityClass: 'deterministic' }
+}
+
+function syncTaskLinksV2(tasks: AgentTaskV2[]): AgentTaskV2[] {
+  const byId = new Map(tasks.map((task) => [task.id, cloneV2(task)]))
+  for (const task of [...byId.values()]) {
+    for (const dependencyId of task.blockedBy) {
+      const dependency = byId.get(dependencyId)
+      if (dependency) dependency.blocks = uniqueIds([...dependency.blocks, task.id], dependency.id)
+    }
+    for (const downstreamId of task.blocks) {
+      const downstream = byId.get(downstreamId)
+      if (downstream) downstream.blockedBy = uniqueIds([...downstream.blockedBy, task.id], downstream.id)
+    }
+  }
+  return [...byId.values()]
+}
+
+function graphV2Error(code: 'IDEMPOTENCY_CONFLICT' | 'DEPENDENCY_UNRESOLVED' | 'DAG_CYCLE', message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code })
+}
+
+function migrationPolicyError(taskId: string, occurredAt: string) {
+  return {
+    schemaVersion: 'async-task-contract-error/v1' as const,
+    code: 'POLICY_VIOLATION' as const,
+    category: 'policy' as const,
+    retryDisposition: 'new_task_required' as const,
+    message: `Legacy browser-write task ${taskId} cannot be replayed in the background.`,
+    occurredAt,
+    taskId,
+  }
+}
+
+function isTerminalStatusV2(status: AgentTaskV2['status']): boolean {
+  return status === 'completed' || status === 'failed' || status === 'killed'
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  return `{${Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, nested]) => `${JSON.stringify(key)}:${canonicalJson(nested)}`)
+    .join(',')}}`
+}
+
+function cloneV2<T>(value: T): T { return structuredClone(value) }

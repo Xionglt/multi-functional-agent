@@ -17,6 +17,8 @@ export interface ToolExecutionMetadata {
   policyCode?: string
   policyRuleId?: string
   policyGateKind?: string
+  /** S001 execution boundary: only block-mode work must settle before return. */
+  interruptBehavior?: 'cancel' | 'block'
 }
 
 export interface ToolUseContext {

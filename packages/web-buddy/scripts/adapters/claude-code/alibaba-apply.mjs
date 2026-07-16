@@ -125,7 +125,7 @@ Options:
   --no-resume              Run without resume context.
   --url <url>              Target careers URL. Defaults to Alibaba off-campus list.
   --prompt <text>          Override the task prompt.
-  --preset <name>          Prompt preset: alibaba or generic. Default: alibaba.
+  --preset <name>          Prompt preset: alibaba, generic, or venue. Default: alibaba.
   --allowed-domains <list> Comma-separated browser allowlist. Defaults to target host.
   --model <name>           Override ANTHROPIC_MODEL for claude-code.
   --base-url <url>         Override ANTHROPIC_BASE_URL for claude-code.
@@ -687,7 +687,7 @@ async function runClaudePass({ cliArgs, env, prompt, runLogPath, stdoutLogPath, 
 async function main() {
   const flags = parseArgs(process.argv.slice(2))
   const env = buildEnv(flags)
-  if (!['alibaba', 'generic'].includes(flags.preset)) {
+  if (!['alibaba', 'generic', 'venue'].includes(flags.preset)) {
     throw new Error(`Invalid --preset value: ${flags.preset}`)
   }
   if (!['terminal', 'file'].includes(flags.handoffMode)) {
@@ -719,7 +719,11 @@ async function main() {
   const stdoutLogPath = join(runDir, 'stdout.log')
   const stderrLogPath = join(runDir, 'stderr.log')
   const streamJsonLogPath = flags.outputFormat === 'stream-json' ? join(runDir, 'stream.jsonl') : undefined
-  const scenario = flags.preset === 'alibaba' ? 'alibaba-apply' : 'generic-web'
+  const scenario = flags.preset === 'alibaba'
+    ? 'alibaba-apply'
+    : flags.preset === 'venue'
+      ? 'venue-booking'
+      : 'generic-web'
 
   const prompt = buildPrompt({ taskPrompt, url, resumePath, resume, preset: flags.preset })
   const promptPath = join(runDir, flags.saveFullPrompt ? 'prompt.full.txt' : 'prompt.redacted.txt')

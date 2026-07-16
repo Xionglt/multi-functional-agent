@@ -1,16 +1,25 @@
-import { randomUUID } from 'node:crypto'
-import { mkdir, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname, relative, sep, join } from 'node:path'
 import type { SessionRecorder } from '../session/session-recorder.js'
 import { appendJsonLine } from '../session/transcript.js'
+import type {
+  ActionBinding,
+  ImmutableArtifactRef,
+  RunnerProgress,
+} from './async-task-contracts.js'
 
 export type SidechainTranscriptEntryType =
   | 'sidechain_started'
+  | 'sidechain_context_envelope'
+  | 'sidechain_progress'
+  | 'sidechain_assistant'
   | 'sidechain_note'
   | 'sidechain_tool_call'
   | 'sidechain_tool_result'
   | 'sidechain_completed'
   | 'sidechain_failed'
+  | 'sidechain_aborted'
 
 export interface SidechainTranscriptEntry {
   version: 1
@@ -48,6 +57,8 @@ export interface SidechainSession {
   agentId: string
   transcriptPath: string
   append(entry: Omit<SidechainTranscriptEntry, 'version' | 'sidechainId' | 'taskId' | 'agentId' | 'ts'>): Promise<void>
+  recordProgress(progress: RunnerProgress): Promise<void>
+  finalizeTranscript(actionBinding: ActionBinding): Promise<ImmutableArtifactRef<'sidechain_transcript'>>
   recordMainSummary(input: RecordSidechainSummaryInput): Promise<void>
 }
 
@@ -57,11 +68,13 @@ export async function createSidechainSession(input: CreateSidechainSessionInput)
   const transcriptPath = input.transcriptPath
     ?? join(input.outputDir, 'sidechains', `${sanitizePathPart(input.taskId)}-${sanitizePathPart(sidechainId)}.jsonl`)
   const now = () => (input.now?.() ?? new Date()).toISOString()
+  let finalizedRef: ImmutableArtifactRef<'sidechain_transcript'> | undefined
 
   await mkdir(dirname(transcriptPath), { recursive: true })
   await writeFile(transcriptPath, '', { flag: 'a' })
 
   const append: SidechainSession['append'] = async (entry) => {
+    if (finalizedRef) throw new Error(`Sidechain transcript is already finalized: ${transcriptPath}`)
     await appendJsonLine(transcriptPath, {
       version: 1,
       sidechainId,
@@ -70,6 +83,52 @@ export async function createSidechainSession(input: CreateSidechainSessionInput)
       ts: now(),
       ...entry,
     } satisfies SidechainTranscriptEntry)
+  }
+
+  const recordProgress: SidechainSession['recordProgress'] = async (progress) => {
+    await append({
+      type: 'sidechain_progress',
+      message: progress.summary,
+      data: {
+        schemaVersion: progress.schemaVersion,
+        runIdentity: progress.runIdentity,
+        progressSeq: progress.progressSeq,
+        phase: progress.phase,
+        occurredAt: progress.occurredAt,
+        authoritativeCompletionEvidence: false,
+      },
+    })
+  }
+
+  const finalizeTranscript: SidechainSession['finalizeTranscript'] = async (actionBinding) => {
+    if (finalizedRef) return finalizedRef
+    const bytes = await readFile(transcriptPath)
+    const relativePath = relative(input.outputDir, transcriptPath)
+    if (!relativePath || relativePath === '..' || relativePath.startsWith(`..${sep}`)) {
+      throw new Error('Sidechain transcript must remain inside the session artifact root.')
+    }
+    const relativeSegments = relativePath.split(sep)
+    if (relativeSegments.some((segment) => !segment || segment === '.' || segment === '..')) {
+      throw new Error('Sidechain transcript has invalid relative storage segments.')
+    }
+    finalizedRef = {
+      schemaVersion: 'immutable-artifact-ref/v1',
+      artifactId: `artifact_${sidechainId}`,
+      artifactKind: 'sidechain_transcript',
+      runId: input.runId,
+      sessionId: input.sessionId,
+      storage: {
+        store: 'session_artifacts',
+        relativeSegments,
+      },
+      mediaType: 'application/x-ndjson',
+      byteLength: bytes.byteLength,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      createdAt: now(),
+      actionBinding,
+      immutable: true,
+    }
+    return finalizedRef
   }
 
   const recordMainSummary: SidechainSession['recordMainSummary'] = async (summaryInput) => {
@@ -129,6 +188,8 @@ export async function createSidechainSession(input: CreateSidechainSessionInput)
     agentId,
     transcriptPath,
     append,
+    recordProgress,
+    finalizeTranscript,
     recordMainSummary,
   }
 }

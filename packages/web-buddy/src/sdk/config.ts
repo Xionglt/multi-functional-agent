@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { isPermissionMode, type PermissionMode } from '../permission/permission-types.js'
+import type { ToolOrchestrationRuntimeModeV1 } from '../tools/tool-orchestrator.js'
 
 export type { PermissionMode } from '../permission/permission-types.js'
 
@@ -85,6 +86,33 @@ export interface HumanLoopConfig {
   autoApproveRisk: Array<'L0' | 'L1' | 'L2'>
 }
 
+export interface AsyncTaskConfig {
+  /** Feature flag. Disabled by default until a runner/context provider factory is supplied. */
+  enabled: boolean
+  maxQueuedTasks: number
+  maxConcurrentReadOnlyLlmTasks: number
+  maxConcurrentDeterministicTasks: number
+  notificationWaitMs: number
+}
+
+/**
+ * Trusted rollout input for foreground tool orchestration. Wave 4 only
+ * activates `shadow`; other modes remain behaviorally serial until their
+ * respective release gates are accepted.
+ */
+export interface ToolOrchestrationConfig {
+  mode: ToolOrchestrationRuntimeModeV1
+  maxConcurrency: number
+  parallelAllowlist: readonly string[]
+}
+
+export interface BackgroundToolPilotConfig {
+  /** Runtime kill switch. Default false. */
+  enabled: boolean
+  /** Trusted code/config allowlist; Wave 6 accepts exactly trace_summarization. */
+  allowlist: readonly string[]
+}
+
 export interface AgentConfig {
   model: ModelConfig
   resumePath: string
@@ -105,7 +133,12 @@ export interface AgentConfig {
   /** Cookie-login (storageState) path. Empty → derive per host under trace.outDir/auth. */
   auth: { storageStatePath: string }
   /** Agent loop tuning. */
-  agent: { maxSteps: number }
+  agent: {
+    maxSteps: number
+    asyncTasks?: AsyncTaskConfig
+    toolOrchestration: ToolOrchestrationConfig
+    backgroundToolPilot: BackgroundToolPilotConfig
+  }
   /** User-scoped runtime memory files. */
   memory: {
     answerStorePath: string
@@ -123,7 +156,11 @@ export interface AgentConfigOverrides extends Partial<Omit<
   trace?: Partial<AgentConfig['trace']>
   human?: Partial<HumanLoopConfig>
   auth?: Partial<AgentConfig['auth']>
-  agent?: Partial<AgentConfig['agent']>
+  agent?: Partial<Omit<AgentConfig['agent'], 'asyncTasks' | 'toolOrchestration' | 'backgroundToolPilot'>> & {
+    asyncTasks?: Partial<AsyncTaskConfig>
+    toolOrchestration?: Partial<ToolOrchestrationConfig>
+    backgroundToolPilot?: Partial<BackgroundToolPilotConfig>
+  }
   memory?: Partial<AgentConfig['memory']>
 }
 
@@ -177,6 +214,18 @@ function permissionModeEnv(env: Record<string, string | undefined>): PermissionM
 
 function humanGateModeEnv(env: Record<string, string | undefined>): HumanLoopConfig['mode'] {
   return env.HUMAN_GATE_MODE === 'auto' ? 'auto' : 'cli'
+}
+
+function toolOrchestrationModeEnv(env: Record<string, string | undefined>): ToolOrchestrationRuntimeModeV1 {
+  const mode = env.WEB_BUDDY_TOOL_ORCHESTRATION_MODE
+  return mode === 'shadow' || mode === 'serial' || mode === 'parallel' || mode === 'legacy'
+    ? mode
+    : 'legacy'
+}
+
+function toolOrchestrationMaxConcurrencyEnv(env: Record<string, string | undefined>): number {
+  const requested = numEnv(env, 'WEB_BUDDY_MAX_TOOL_CONCURRENCY', 4)
+  return Math.min(4, Math.max(1, Math.floor(requested)))
 }
 
 function expandKnownRecruitmentAllowedDomains(domains: string[]): string[] {
@@ -306,7 +355,32 @@ export function loadConfig(overrides: AgentConfigOverrides = {}): AgentConfig {
     maxJobsToCrawl: overrides.maxJobsToCrawl ?? numEnv(env, 'AGENT_MAX_JOBS_TO_CRAWL', 100),
     matchThreshold: overrides.matchThreshold ?? numEnv(env, 'AGENT_MATCH_THRESHOLD', 0.45),
     auth: { storageStatePath: env.PLAYWRIGHT_STORAGE_STATE ?? '' },
-    agent: { maxSteps: numEnv(env, 'AGENT_MAX_STEPS', 16) },
+    agent: {
+      maxSteps: numEnv(env, 'AGENT_MAX_STEPS', 16),
+      asyncTasks: {
+        enabled: overrides.agent?.asyncTasks?.enabled ?? boolEnv(env, 'WEB_BUDDY_ASYNC_TASKS_ENABLED', false),
+        maxQueuedTasks: overrides.agent?.asyncTasks?.maxQueuedTasks ?? numEnv(env, 'WEB_BUDDY_ASYNC_TASK_MAX_QUEUED', 32),
+        maxConcurrentReadOnlyLlmTasks: overrides.agent?.asyncTasks?.maxConcurrentReadOnlyLlmTasks
+          ?? numEnv(env, 'WEB_BUDDY_ASYNC_TASK_MAX_LLM', 2),
+        maxConcurrentDeterministicTasks: overrides.agent?.asyncTasks?.maxConcurrentDeterministicTasks
+          ?? numEnv(env, 'WEB_BUDDY_ASYNC_TASK_MAX_DETERMINISTIC', 4),
+        notificationWaitMs: overrides.agent?.asyncTasks?.notificationWaitMs
+          ?? numEnv(env, 'WEB_BUDDY_ASYNC_TASK_WAIT_MS', 15_000),
+      },
+      toolOrchestration: {
+        mode: overrides.agent?.toolOrchestration?.mode ?? toolOrchestrationModeEnv(env),
+        maxConcurrency: overrides.agent?.toolOrchestration?.maxConcurrency
+          ?? toolOrchestrationMaxConcurrencyEnv(env),
+        // Kept empty until the Wave 5 allowlist gate. Model output cannot widen this.
+        parallelAllowlist: overrides.agent?.toolOrchestration?.parallelAllowlist ?? [],
+      },
+      backgroundToolPilot: {
+        enabled: overrides.agent?.backgroundToolPilot?.enabled
+          ?? boolEnv(env, 'WEB_BUDDY_TRACE_SUMMARIZATION_BACKGROUND_ENABLED', false),
+        allowlist: overrides.agent?.backgroundToolPilot?.allowlist
+          ?? (boolEnv(env, 'WEB_BUDDY_TRACE_SUMMARIZATION_BACKGROUND_ENABLED', false) ? ['trace_summarization'] : []),
+      },
+    },
     memory: {
       answerStorePath: resolve(
         overrides.memory?.answerStorePath ??

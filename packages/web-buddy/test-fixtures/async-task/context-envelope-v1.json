@@ -1,0 +1,98 @@
+{
+  "schemaVersion": "subagent-context-envelope/v1",
+  "envelopeId": "envelope_fixture_001",
+  "taskId": "task_trace_001",
+  "taskKind": "trace_summarization",
+  "parentRunId": "run_fixture_001",
+  "parentSessionId": "session_fixture_001",
+  "createdAt": "2026-07-10T00:00:00.000Z",
+  "sourceGraphRevision": 2,
+  "currentActionBinding": { "kind": "browser_action", "sourceActionSeq": 7 },
+  "objective": {
+    "schemaVersion": "sanitized-text-projection/v1",
+    "text": "Summarize repeated failures in the frozen trace.",
+    "projectionPolicy": "no_react_history/v1",
+    "sourceArtifactRefs": [],
+    "sourceItemCount": 1,
+    "maxChars": 500,
+    "contentDigest": "73e08fea18c34bc953b91a7f87b0b1e57d18188a3d8400ba6ed842d86fd23615"
+  },
+  "outputSchemaRef": {
+    "schemaVersion": "immutable-artifact-ref/v1",
+    "artifactId": "schema_read_only_result_v1",
+    "artifactKind": "schema",
+    "runId": "run_fixture_001",
+    "sessionId": "session_fixture_001",
+    "storage": { "store": "session_artifacts", "relativeSegments": ["schemas", "read-only-subagent-result-v1.json"] },
+    "mediaType": "application/schema+json",
+    "byteLength": 256,
+    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "createdAt": "2026-07-10T00:00:00.000Z",
+    "actionBinding": { "kind": "not_action_bound" },
+    "immutable": true
+  },
+  "selectorPolicyVersion": "context-selector-policy/v1",
+  "catalogManifest": {
+    "schemaVersion": "context-catalog-manifest/v1",
+    "catalogRevision": 4,
+    "catalogDigest": "7e8c3e191e625c0d8d54ab39b3552b510e7a8dfc7324f54d2351bc13e5dd85b7",
+    "canonicalization": "context-catalog-item-ids-jcs/v1",
+    "candidateItemIds": ["ctx_trace_001", "ctx_secret_001"],
+    "candidateCount": 2
+  },
+  "allowedTools": ["artifact_read_text", "artifact_search_text"],
+  "authorityBoundary": {
+    "browserWrite": false,
+    "livePageAccess": false,
+    "authoritativeCompletionEvidence": false,
+    "requiresMainWorkflowVerification": true,
+    "gates": { "login": false, "captcha": false, "upload": false, "save": false, "finalSubmit": false }
+  },
+  "sensitiveDisclosureGrants": [],
+  "selectedContext": [
+    {
+      "id": "ctx_trace_001",
+      "sensitivity": "user",
+      "freshness": { "state": "current", "sourceActionSeq": 7, "assessedAgainstActionSeq": 7 },
+      "allowedTaskKinds": ["trace_summarization"],
+      "tokenEstimate": 96,
+      "selectedReason": "required_task_input",
+      "unit": {
+        "kind": "artifact",
+        "artifactRef": {
+          "schemaVersion": "immutable-artifact-ref/v1",
+          "artifactId": "artifact_trace_001",
+          "artifactKind": "trace",
+          "runId": "run_fixture_001",
+          "sessionId": "session_fixture_001",
+          "storage": { "store": "session_artifacts", "relativeSegments": ["traces", "trace-001.jsonl"] },
+          "mediaType": "application/x-ndjson",
+          "byteLength": 2048,
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "createdAt": "2026-07-10T00:00:00.000Z",
+          "actionBinding": { "kind": "browser_action", "sourceActionSeq": 7 },
+          "immutable": true
+        },
+        "sanitizedSummary": {
+          "schemaVersion": "sanitized-text-projection/v1",
+          "text": "Frozen trace for action sequence 7.",
+          "projectionPolicy": "no_react_history/v1",
+          "sourceArtifactRefs": [],
+          "sourceItemCount": 1,
+          "maxChars": 500,
+          "contentDigest": "9cfe22ed9d59405408b3797cc5bb13bce685b1e519cdfa298549b8887e27fe1c"
+        }
+      }
+    }
+  ],
+  "omittedContext": [{ "id": "ctx_secret_001", "sensitivity": "secret", "reason": "secret_denied" }],
+  "tokenBudget": {
+    "estimator": "web-buddy-token-estimator/v1",
+    "maxInputTokens": 1024,
+    "fixedEnvelopeTokens": 128,
+    "selectedContextTokens": 96,
+    "usedInputTokens": 224,
+    "reservedOutputTokens": 256
+  },
+  "parentHistoryIncluded": false
+}

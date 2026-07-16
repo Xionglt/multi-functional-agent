@@ -1,5 +1,6 @@
 import type { KernelEvent } from '../kernel/kernel-events.js'
 import type { ToolResultArtifactRef } from '../tools/tool-result-store.js'
+import type { TaskNotificationPromptAttachmentV1 } from '../agents/async-task-contracts.js'
 
 export type AgentSessionSource = 'cli' | 'web' | 'sdk' | 'benchmark' | 'test'
 
@@ -160,6 +161,13 @@ export interface ContextCompactionEntry extends TranscriptEntryBase {
   summary: unknown
 }
 
+export interface AsyncTaskNotificationAttachmentEntry extends TranscriptEntryBase {
+  type: 'async_task_notification_attachment'
+  attachment: TaskNotificationPromptAttachmentV1
+  /** Exact parent prompt message persisted atomically with the delivery attachment. */
+  content: string
+}
+
 export interface FinalResultEntry extends TranscriptEntryBase {
   type: 'final_result'
   status: 'completed' | 'blocked' | 'failed' | 'aborted'
@@ -191,6 +199,7 @@ export type TranscriptEntry =
   | WorkflowEvaluationEntry
   | CompletionGateEntry
   | ContextCompactionEntry
+  | AsyncTaskNotificationAttachmentEntry
   | FinalResultEntry
   | ErrorEntry
 

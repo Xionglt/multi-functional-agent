@@ -2,6 +2,7 @@ import type { FormState } from '../observation/form-state.js'
 import type { PageState } from '../observation/page-state.js'
 import type { FillLedgerSummary } from '../fill/fill-ledger.js'
 import type { FormCoverage } from '../observation/form-state.js'
+import type { MainCompletionReadinessV1 } from '../agents/async-task-contracts.js'
 import type {
   WorkflowBlocker,
   WorkflowCriterionMissing,
@@ -29,7 +30,10 @@ export interface CompletionGateInput {
   fillLedgerSummary?: FillLedgerSummary
   requiresCurrentResumeUpload?: boolean
   currentResumeUploaded?: boolean
+  asyncTaskRuntimeEnabled?: boolean
+  mainCompletionReadiness?: MainCompletionReadinessV1
   taskType?: WebBuddyTaskType
+  summaryAuthority?: 'main_agent' | 'read_only_subagent'
   source?: 'agent_done' | 'finalize' | 'manual' | (string & {})
 }
 
@@ -70,6 +74,38 @@ export class CompletionGate {
       })
     }
 
+    if (input.asyncTaskRuntimeEnabled && !input.mainCompletionReadiness) {
+      missingCriteria.push(requiredAsyncTaskReadinessMissingCriterion())
+      return decision({
+        action: 'reject',
+        recommendedStatus: 'unchanged',
+        reason: completionReason(
+          'PREMATURE_AGENT_DONE_REJECTED. Completion gate rejected completion because async-task readiness was not supplied by the runtime authority.',
+          input,
+        ),
+        missingCriteria,
+        blockers,
+        workflowPhase,
+        evidenceIds,
+      })
+    }
+
+    if (input.mainCompletionReadiness?.state === 'blocked_required_tasks') {
+      missingCriteria.push(requiredAsyncTasksIncompleteCriterion(input.mainCompletionReadiness))
+      return decision({
+        action: 'reject',
+        recommendedStatus: 'unchanged',
+        reason: completionReason(
+          'PREMATURE_AGENT_DONE_REJECTED. Completion gate rejected completion because required asynchronous tasks have not satisfied their terminal policy.',
+          input,
+        ),
+        missingCriteria,
+        blockers,
+        workflowPhase,
+        evidenceIds,
+      })
+    }
+
     const verdict = evaluateTaskCompletion({
       taskType,
       page: input.page,
@@ -78,7 +114,7 @@ export class CompletionGate {
       fillLedgerSummary: input.fillLedgerSummary ?? input.workflowState?.fillLedgerSummary,
       requiresCurrentResumeUpload: input.requiresCurrentResumeUpload,
       currentResumeUploaded: input.currentResumeUploaded ?? input.workflowState?.currentResumeUploaded,
-      summary: input.summary,
+      summary: input.summaryAuthority === 'read_only_subagent' ? undefined : input.summary,
       evidenceSnapshot: taskCompletionEvidenceSnapshot(input, workflowPhase),
     })
     const externalBlockerVisible = verdict.externalBlockerVisible || blockers.some(isExternalCompletionBlocker)
@@ -185,8 +221,43 @@ function decision(input: Omit<CompletionGateDecision, 'schemaVersion'>): Complet
 
 function completionReason(reason: string, input: CompletionGateInput): string {
   const source = input.source ? ` Source: ${input.source}.` : ''
-  const summary = input.summary ? ` Agent summary: ${input.summary}` : ''
+  const summary = input.summary
+    ? input.summaryAuthority === 'read_only_subagent'
+      ? ` Non-authoritative subagent summary (not completion evidence): ${input.summary}`
+      : ` Agent summary: ${input.summary}`
+    : ''
   return `${reason}${source}${summary}`
+}
+
+function requiredAsyncTasksIncompleteCriterion(
+  readiness: Extract<MainCompletionReadinessV1, { state: 'blocked_required_tasks' }>,
+): WorkflowCriterionMissing {
+  const pending = [...readiness.pendingOrRunningTaskIds]
+  const failed = [...readiness.failedOrKilledTaskIds]
+  return {
+    id: 'required_async_tasks_incomplete',
+    kind: 'evidence_required',
+    description: 'Required asynchronous tasks must satisfy their frozen terminal policy before main completion verification.',
+    evidenceKinds: [],
+    missingEvidenceKinds: [],
+    evidenceIds: [],
+    reason: [
+      ...(pending.length > 0 ? [`Pending or running required tasks: ${pending.join(', ')}.`] : []),
+      ...(failed.length > 0 ? [`Required tasks that failed or were killed: ${failed.join(', ')}.`] : []),
+    ].join(' ') || 'Required asynchronous tasks have not satisfied their terminal policy.',
+  }
+}
+
+function requiredAsyncTaskReadinessMissingCriterion(): WorkflowCriterionMissing {
+  return {
+    id: 'required_async_task_readiness_missing',
+    kind: 'evidence_required',
+    description: 'The enabled async-task runtime must provide typed completion readiness.',
+    evidenceKinds: [],
+    missingEvidenceKinds: [],
+    evidenceIds: [],
+    reason: 'MainCompletionReadinessV1 was not supplied by the runtime authority.',
+  }
 }
 
 function taskCompletionMissingCriterion(missingEvidence: string[]): WorkflowCriterionMissing {

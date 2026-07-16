@@ -13,6 +13,7 @@ import type { WorkflowConfidence, WorkflowPhase } from '../workflow/workflow-sta
 import type { PageFacts } from '../observation/page-facts.js'
 import type { PageType } from '../observation/page-state.js'
 import type { RecentActionStatus } from './types.js'
+import type { AgentTaskCompactFactV1 } from '../agents/async-task-contracts.js'
 
 export const COMPACTED_RUN_CONTEXT_PREFIX = 'COMPACTED_RUN_CONTEXT'
 
@@ -46,6 +47,8 @@ export interface CompactRunSummary {
   completion?: CompactCompletionSummary
   permissionContract?: CompactPermissionContract
   answerMemory?: CompactAnswerMemorySummary
+  /** Durable task facts only; child prompts and ReAct transcripts are intentionally excluded. */
+  agentTasks?: AgentTaskCompactFactV1[]
   failurePatterns?: CompactFailurePattern[]
   staleRefs?: CompactStaleRefSummary
   semanticSummary?: SemanticCompactSummary

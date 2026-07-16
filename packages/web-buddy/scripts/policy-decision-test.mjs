@@ -7,6 +7,19 @@ import {
   requiresHumanGate,
   shouldStopAfterGateDecision,
 } from '../dist/policy/agent-policy.js'
+import { detectElementRisk } from '../dist/snapshot/risk.js'
+
+assert.equal(detectElementRisk({
+  tag: 'button',
+  name: '按条件比较 5 个场地',
+  text: '按条件比较 5 个场地',
+  typeAttr: 'submit',
+}), 'L1')
+assert.equal(detectElementRisk({ tag: 'input', name: 'Search', typeAttr: 'submit' }), 'L1')
+assert.equal(detectElementRisk({ tag: 'button', name: 'Apply filters', typeAttr: 'submit' }), 'L1')
+assert.equal(detectElementRisk({ tag: 'button', name: '确认并支付订金', typeAttr: 'button' }), 'L3')
+assert.equal(detectElementRisk({ tag: 'button', name: '提交申请', typeAttr: 'submit' }), 'L3')
+assert.equal(detectElementRisk({ tag: 'button', name: 'Compare then submit application', typeAttr: 'submit' }), 'L3')
 
 const finalSubmit = decideToolPolicy({
   toolName: 'browser_click_text',

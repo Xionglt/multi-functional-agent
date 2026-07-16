@@ -44,6 +44,10 @@ import {
   type SessionRecorder,
 } from '../session/index.js'
 import type { WebBuddyTaskType } from '../workflow/completion-gate.js'
+import type { AsyncTaskRuntime } from '../agents/async-task-runtime.js'
+import { BackgroundToolBridge, createTraceSummarizationMappingV1 } from '../tools/background-tool-bridge.js'
+import { createLocalTools } from '../tools/local-adapter.js'
+import { listLocalToolDefs } from '../tools/catalog.js'
 
 /**
  * Unified local Web Agent orchestrator. One pipeline, plus safe demos:
@@ -128,6 +132,16 @@ export interface RunOptions {
   targetPositionId?: string
   /** Explicit live delivery probe title target when a position id is unavailable. */
   targetJobTitle?: string
+  /** Builds the session-scoped async runtime with application-owned runners and Context Envelope providers. */
+  asyncTaskRuntimeFactory?: (input: AsyncTaskRuntimeFactoryInput) => AsyncTaskRuntime | Promise<AsyncTaskRuntime>
+}
+
+export interface AsyncTaskRuntimeFactoryInput {
+  browserSessionId: string
+  session: SessionRecorder
+  config: AgentConfig
+  llm: LlmGateway
+  trace: TraceRecorder
 }
 
 function mockApplicationFormUrl(profile: ResumeProfile): string {
@@ -719,6 +733,10 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
     }
 
     const useLlm = llm.hasKey
+    const asyncTasksEnabled = config.agent.asyncTasks?.enabled === true || Boolean(options.asyncTaskRuntimeFactory)
+    if (asyncTasksEnabled && !options.asyncTaskRuntimeFactory) {
+      throw new Error('Async tasks are enabled, but no asyncTaskRuntimeFactory supplied runners and an S004 Context Envelope provider.')
+    }
     const llmExtraContext = [
       extraContext,
       `Task type: ${taskType}. Completion criteria must follow this task contract.`,
@@ -727,6 +745,15 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
         : currentResumeReadOnlyContext(config.resumePath),
     ].filter(Boolean).join('\n')
     if (useLlm) {
+      const asyncTaskRuntime = asyncTasksEnabled
+        ? await options.asyncTaskRuntimeFactory!({
+            browserSessionId: sessionId,
+            session: sessionRecorder,
+            config,
+            llm,
+            trace,
+          })
+        : undefined
       const goal =
         mode === 'raw'
           ? options.taskPrompt || DEFAULT_ALIBABA_APPLY_PROMPT
@@ -735,10 +762,16 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
           : mode === 'alibaba-apply'
             ? options.taskPrompt || DEFAULT_ALIBABA_APPLY_PROMPT
           : 'Fill the application form on the current page using my resume. Map resume fields to the matching form inputs. Do NOT click any submit/投递 button. If you hit a login wall or captcha, call agent_done with blocked=true.'
+      const backgroundPilotEnabled = config.agent.backgroundToolPilot.enabled
+        && config.agent.backgroundToolPilot.allowlist.length === 1
+        && config.agent.backgroundToolPilot.allowlist[0] === 'trace_summarization'
+        && Boolean(asyncTaskRuntime)
       const loopResult = await runAgentLoop({
         goal, resume: profile, resumeV2: profileV2, llm,
-        registry: new ToolRegistry(),
-        ctx: { sessionId, highlight, trace },
+        registry: new ToolRegistry(createLocalTools(listLocalToolDefs({
+          traceSummarizationBackground: backgroundPilotEnabled,
+        }))),
+        ctx: { sessionId, highlight, trace, ...(asyncTaskRuntime ? { asyncTaskRuntime } : {}) },
         gate, extraContext: llmExtraContext,
         safetyMode: mode === 'raw' ? 'raw' : 'guarded',
         permissionMode: config.human.permissionMode,
@@ -752,6 +785,13 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
         persistentPermissionRules: { path: config.memory.permissionRulesPath },
         memdir: { path: config.memory.memdirPath },
         maxSteps: config.agent.maxSteps,
+        toolOrchestration: config.agent.toolOrchestration,
+        ...(backgroundPilotEnabled && asyncTaskRuntime ? {
+          backgroundToolBridge: new BackgroundToolBridge({
+            runtime: asyncTaskRuntime,
+            mappings: [createTraceSummarizationMappingV1()],
+          }),
+        } : {}),
         taskType,
         requiresCurrentResumeUpload: options.requiresCurrentResumeUpload ?? false,
         onEvent: (e) => emit({ phase: 'agent', level: e.level, message: e.message }),

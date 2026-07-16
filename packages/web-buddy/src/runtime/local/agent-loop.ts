@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { browserSnapshot } from '../../browser/snapshot.js'
 import { browserFormSnapshot } from '../../browser/form-snapshot.js'
 import {
@@ -88,6 +89,26 @@ import type { RiskLevel } from '../../sdk/trace.js'
 import type { LocalToolRunResult } from '../../tools/local-adapter.js'
 import { ToolExecutionService } from '../../tools/tool-execution-service.js'
 import { toLegacyToolRunResult, type NormalizedToolResult } from '../../tools/tool-result.js'
+import { createNormalizedToolError } from '../../tools/tool-errors.js'
+import type { BackgroundToolBridgeV1 } from '../../tools/background-tool-bridge.js'
+import type { ToolCall } from '../../tools/tool-contract.js'
+import {
+  orchestrateToolCalls,
+  partitionToolCalls,
+  type PreparedToolCallV1,
+  type ToolCommitOutcomeV1,
+  type ToolPrepareOutcomeV1,
+  type ToolRunOutcomeV1,
+  type ToolBatchDiagnosticV1,
+  type ToolBatchPlanV1,
+  type ToolOrchestrationRuntimeModeV1,
+  type ToolTerminalProposalV1,
+} from '../../tools/tool-orchestrator.js'
+import {
+  FAIL_CLOSED_TOOL_EXECUTION_POLICY_V1,
+  type ResolvedToolExecutionPolicyV1,
+  type ToolExecutionPolicyDiagnosticV1,
+} from '../../tools/tool-execution-policy.js'
 import {
   FileToolResultStore,
   type ToolResultArtifactKind,
@@ -106,6 +127,15 @@ import { EvidenceStore, type AddWorkflowEvidenceInput, type WorkflowEvidence } f
 import { createInitialWorkflowState, type WorkflowState } from '../../workflow/workflow-state.js'
 import { pageView } from './page-view.js'
 import { ToolRegistry, type ToolContext } from './tool-registry.js'
+import {
+  buildAgentTasksPromptSummary,
+  renderAgentTasksPromptContent,
+  renderTaskNotificationPromptAttachment,
+} from '../../agents/async-task-prompt.js'
+import type {
+  MainCompletionReadinessV1,
+  TaskNotificationPromptAttachmentV1,
+} from '../../agents/async-task-contracts.js'
 
 export interface AgentEvent {
   step: number
@@ -145,6 +175,8 @@ export interface AgentLoopInput {
   session?: SessionRecorder
   /** Chat transcript restored from session transcript and prepended to the next model call. */
   restoredMessages?: ChatMessage[]
+  /** Prompt-delivery receipts restored from the durable session transcript. */
+  restoredAsyncTaskPromptAttachments?: TaskNotificationPromptAttachmentV1[]
   /** Optional kernel/run-controller abort signal. Checked before model/tool work. */
   abortSignal?: AbortSignal
   /** Optional execution service for tests or alternate local runtimes. */
@@ -173,6 +205,18 @@ export interface AgentLoopInput {
   completionGate?: AgentLoopCompletionGate
   /** Optional store for large tool-result artifacts. Defaults to the run trace artifact directory. */
   toolResultStore?: ToolResultStore
+  /** Trusted rollout controls; `parallel` is a narrow Wave-5 allowlisted path. */
+  toolOrchestration?: Partial<ToolOrchestrationOptions>
+  /** Wave 6 pilot adapter. Only trusted background-eligible mappings may be supplied. */
+  backgroundToolBridge?: BackgroundToolBridgeV1
+}
+
+export type ToolOrchestrationMode = ToolOrchestrationRuntimeModeV1
+
+export interface ToolOrchestrationOptions {
+  mode: ToolOrchestrationMode
+  maxConcurrency: number
+  parallelAllowlist: readonly string[]
 }
 
 export interface AgentLoopResult {
@@ -243,6 +287,12 @@ interface RememberingHumanGate extends HumanGate {
 }
 
 const DEFAULT_MAX_STEPS = 16
+const DEFAULT_TOOL_ORCHESTRATION_OPTIONS: ToolOrchestrationOptions = Object.freeze({
+  mode: 'legacy',
+  maxConcurrency: 4,
+  parallelAllowlist: [],
+})
+const MAX_TOOL_ORCHESTRATION_CONCURRENCY = 4
 export const RAW_MODE_EXCLUDED_TOOLS = [
   'job_match_candidates',
   'plan_form_fill',
@@ -257,6 +307,7 @@ export const RAW_MODE_EXCLUDED_TOOLS = [
  */
 export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResult> {
   const { llm, registry, gate, resume, goal, onEvent } = input
+  const toolOrchestration = resolveToolOrchestrationOptions(input.toolOrchestration)
   const profileStore = new ProfileStore(resume, input.resumeV2)
   const answerStore = input.ctx.answerStore ?? (input.persistentAnswerStore
     ? await AnswerStore.load(input.persistentAnswerStore.path)
@@ -278,12 +329,21 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     llm,
   }
   const loopInput: AgentLoopInput = { ...input, ctx }
+  const asyncTaskRuntime = ctx.asyncTaskRuntime
+  if (asyncTaskRuntime) {
+    if (!input.session || input.session.durability !== 'durable') {
+      throw new Error('AsyncTaskRuntime requires a durable SessionRecorder before notifications can be acknowledged.')
+    }
+    await asyncTaskRuntime.initialize({
+      persistedPromptAttachments: input.restoredAsyncTaskPromptAttachments,
+    })
+  }
   const safetyMode = input.safetyMode ?? 'guarded'
   const maxSteps = input.maxSteps ?? DEFAULT_MAX_STEPS
   const emit = (level: AgentEvent['level'], message: string, step: number) =>
     onEvent?.({ step, level, message })
 
-  const tools = toolsForSafetyMode(registry, safetyMode)
+  const tools = toolsForSafetyMode(registry, safetyMode, Boolean(asyncTaskRuntime))
   const toolExecution = input.toolExecutionService ?? new ToolExecutionService(registry)
   const permissionMode = input.permissionMode ?? 'safe'
   const permissionEngine = input.permissionEngine ?? new PermissionEngine({
@@ -862,6 +922,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     reason?: string,
   ) => {
     persistRiskDecisions()
+    if (asyncTaskRuntime) await asyncTaskRuntime.abortSession()
     if (!session || sessionFinalized) return
     sessionFinalized = true
     await sessionTranscript({
@@ -1035,7 +1096,85 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   }
   syncFillLedgerSummary(latestContext)
   let messages: ChatMessage[] = initialMessageSet(latestContext, firstView, input.restoredMessages)
+  const refreshAsyncTaskPromptContext = async () => {
+    if (!asyncTaskRuntime) return
+    const graph = await asyncTaskRuntime.snapshot()
+    latestContext = {
+      ...latestContext,
+      agentTasks: renderAgentTasksPromptContent(buildAgentTasksPromptSummary(graph), { maxChars: 1600 }),
+    }
+  }
+  const asyncCompletionReadiness = async (): Promise<MainCompletionReadinessV1 | undefined> => {
+    if (!asyncTaskRuntime) return undefined
+    try {
+      return await asyncTaskRuntime.completionReadiness()
+    } catch (error) {
+      emit('warn', `Async completion readiness unavailable: ${error instanceof Error ? error.message : String(error)}`, step)
+      return undefined
+    }
+  }
+  const injectAsyncTaskNotifications = async (turnId: string): Promise<number> => {
+    if (!asyncTaskRuntime) return 0
+    await asyncTaskRuntime.tick()
+    const claimed = await asyncTaskRuntime.drainNotifications({
+      claimantId: `main_agent_${ctx.sessionId}`,
+      claimLeaseMs: 30_000,
+    })
+    await refreshAsyncTaskPromptContext()
+    if (claimed.length === 0) return 0
+
+    const persistedAt = new Date().toISOString()
+    const promptMessageId = `async_updates_${turnId}_${randomUUID()}`
+    const attachment: TaskNotificationPromptAttachmentV1 = {
+      schemaVersion: 'task-notification-prompt-attachment/v1',
+      sessionId: asyncTaskRuntime.sessionId,
+      promptMessageId,
+      notificationIds: claimed.map((item) => item.notification.notificationId),
+      persistedAt,
+      authoritativeCompletionEvidence: false,
+    }
+    const content = renderTaskNotificationPromptAttachment(
+      attachment,
+      claimed.map((item) => item.notification),
+    )
+
+    if (session) {
+      // Persist the prompt effect and its delivery receipt in one transcript entry.
+      await session.transcriptDurably({
+        type: 'async_task_notification_attachment',
+        turnId,
+        attachment,
+        content,
+      })
+    }
+    messages.push({ role: 'user', content })
+
+    for (const item of claimed) {
+      await asyncTaskRuntime.acknowledgeNotification({
+        schemaVersion: 'agent-task-notification-ack/v1',
+        acknowledgementId: `ack_${item.delivery.deliveryId}_${promptMessageId}`,
+        notificationId: item.notification.notificationId,
+        deliveryId: item.delivery.deliveryId,
+        claimId: item.delivery.claimId,
+        injectedPromptMessageId: promptMessageId,
+        acknowledgedAt: persistedAt,
+      })
+    }
+    await sessionEvent({
+      type: 'agent_task_notifications_injected',
+      turnId,
+      message: `Injected ${claimed.length} asynchronous task update(s).`,
+      data: {
+        promptMessageId,
+        notificationIds: attachment.notificationIds,
+        authoritativeCompletionEvidence: false,
+      },
+    })
+    emit('observe', `Injected ${claimed.length} background task update(s).`, step)
+    return claimed.length
+  }
   const maybeCompactMessages = async (turnId: string) => {
+    const agentTaskFacts = asyncTaskRuntime ? await asyncTaskRuntime.compactFacts() : undefined
     const compaction = await compactContextIfNeeded({
       goal,
       runId: session?.session.runId ?? ctx.trace.runId,
@@ -1060,6 +1199,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       semanticLlm: input.llm,
       semanticCompaction: input.semanticCompaction,
       microCompaction: input.microCompaction,
+      agentTaskFacts,
     })
     await sessionEvent({
       type: 'token_budget_updated',
@@ -1154,6 +1294,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     await sessionEvent({ type: 'turn_started', turnId, message: `Turn ${step} started.` })
     const abortedBeforeModel = await checkAbort(turnId)
     if (abortedBeforeModel) return abortedBeforeModel
+    await injectAsyncTaskNotifications(turnId)
     await maybeCompactMessages(turnId)
     const abortedAfterCompaction = await checkAbort(turnId)
     if (abortedAfterCompaction) return abortedAfterCompaction
@@ -1213,8 +1354,36 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     // No tool calls → model is done (or narrating). Treat as final.
     if (completion.toolCalls.length === 0) {
       summary = completion.content.trim() || 'model produced no further tool calls'
+      const mainCompletionReadiness = await asyncCompletionReadiness()
+      if (mainCompletionReadiness?.state === 'blocked_required_tasks'
+        && mainCompletionReadiness.pendingOrRunningTaskIds.length > 0
+        && asyncTaskRuntime) {
+        done = false
+        const pendingSummary = [
+          ...mainCompletionReadiness.pendingOrRunningTaskIds,
+          ...mainCompletionReadiness.failedOrKilledTaskIds,
+        ].join(', ')
+        messages.push({ role: 'assistant', content: completion.content })
+        messages.push({
+          role: 'user',
+          content: `ASYNC_TASKS_PENDING\nRequired background tasks still block completion: ${pendingSummary || '(unknown)'}. Wait for updates or inspect/cancel the tasks before calling agent_done.`,
+        })
+        emit('observe', `Waiting for required background task(s): ${pendingSummary || '(unknown)'}.`, step)
+        await asyncTaskRuntime.waitForChange(
+          asyncTaskRuntime.sessionId,
+          input.abortSignal ?? new AbortController().signal,
+          5_000,
+        )
+        await sessionEvent({
+          type: 'turn_completed',
+          turnId,
+          message: `Turn ${step} paused for required background tasks.`,
+          data: { done: false, blocked: false, pendingTaskIds: mainCompletionReadiness.pendingOrRunningTaskIds },
+        })
+        continue
+      }
       done = true
-      if (safetyMode !== 'raw' && isFinalSubmitBoundaryActive(workflowState, lastWorkflowEvaluation)) {
+      if (asyncTaskRuntime || (safetyMode !== 'raw' && isFinalSubmitBoundaryActive(workflowState, lastWorkflowEvaluation))) {
         const completionGateDecision = completionGate.evaluate({
           done,
           blocked: false,
@@ -1229,8 +1398,28 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           currentResumeUploaded,
           taskType,
           source: 'model_no_tool_calls',
+          asyncTaskRuntimeEnabled: Boolean(asyncTaskRuntime),
+          ...(mainCompletionReadiness ? { mainCompletionReadiness } : {}),
+          summaryAuthority: 'main_agent',
         })
         await recordCompletionGateDecision(completionGateDecision, step)
+        if (completionGateDecision.action === 'reject') {
+          done = false
+          blocked = false
+          summary = completionGateDecision.reason
+          const completionGateBlockSummary = completionGateBlockerSummary(completionGateDecision)
+          rememberUniqueBlocker(blockers, completionGateBlockSummary)
+          messages.push({ role: 'assistant', content: completion.content })
+          messages.push({ role: 'user', content: `COMPLETION_REJECTED\n${completionGateDecision.reason}` })
+          emit('gate', completionGateBlockSummary, step)
+          await sessionEvent({
+            type: 'turn_completed',
+            turnId,
+            message: `Turn ${step} completion was rejected.`,
+            data: { done, blocked, completionGateAction: 'reject' },
+          })
+          continue
+        }
         if (completionGateDecision.action === 'block') {
           blocked = true
           summary = completionGateDecision.reason
@@ -1267,9 +1456,185 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       })),
     })
 
-    for (const call of completion.toolCalls) {
-      const abortedBeforeTool = await checkAbort(turnId)
-      if (abortedBeforeTool) return abortedBeforeTool
+    // Wave 4's only active rollout behavior: compute and persist a prospective
+    // plan. It is intentionally a non-canonical diagnostic; execution below
+    // remains the Stage-A serial loop and does not invoke ToolOrchestrator.
+    const shadowDiagnostics: Array<ToolBatchDiagnosticV1 | ToolExecutionPolicyDiagnosticV1> = []
+    let shadowPlan: ToolBatchPlanV1 | undefined
+    let shadowPlanError: string | undefined
+    if (toolOrchestration.mode === 'shadow') {
+      try {
+        shadowPlan = partitionToolCalls(completion.toolCalls, {
+          turnId,
+          mode: 'shadow',
+          maxConcurrency: toolOrchestration.maxConcurrency,
+          maxConcurrencyUpperBound: MAX_TOOL_ORCHESTRATION_CONCURRENCY,
+          resolvePolicy: (call) => registry.resolveExecutionPolicy(call.name, call.arguments, ctx, (diagnostic) => {
+            shadowDiagnostics.push(diagnostic)
+          }),
+          onDiagnostic: (diagnostic) => shadowDiagnostics.push(diagnostic),
+        })
+      } catch (error) {
+        // Shadow must never make a previously executable serial turn fail.
+        shadowPlanError = error instanceof Error ? error.message : String(error)
+      }
+    }
+    const shadowProcessedIndexes: number[] = []
+    const shadowRunIndexes: number[] = []
+    let shadowDiagnosticRecorded = false
+    const recordShadowPlanDiagnostic = async () => {
+      if (toolOrchestration.mode !== 'shadow' || shadowDiagnosticRecorded) return
+      shadowDiagnosticRecorded = true
+      const plannedIndexes = shadowPlan?.batches.flatMap((batch) => batch.calls.map((item) => item.index)) ?? []
+      const data = {
+        schemaVersion: 'tool-orchestration-shadow-diagnostic/v1',
+        canonical: false,
+        configuredMode: toolOrchestration.mode,
+        effectiveExecutionMode: 'serial',
+        maxConcurrency: shadowPlan?.maxConcurrency ?? toolOrchestration.maxConcurrency,
+        effectiveMaxConcurrency: 1,
+        batches: shadowPlan?.batches.map((batch) => ({
+          batchId: batch.batchId,
+          mode: batch.mode,
+          indexes: batch.calls.map((item) => item.index),
+          calls: batch.calls.map((item) => ({
+            index: item.index,
+            toolCallId: item.call.id,
+            name: item.call.name,
+            policy: {
+              foreground: item.policy.foreground,
+              resource: item.policy.resource,
+              interruptBehavior: item.policy.interruptBehavior,
+              background: item.policy.background,
+              source: item.policy.source,
+              ...(item.policy.resourceKey ? { resourceKey: item.policy.resourceKey } : {}),
+            },
+          })),
+        })) ?? [],
+        diagnostics: shadowDiagnostics,
+        ...(shadowPlanError ? { planningError: shadowPlanError } : {}),
+        actual: {
+          processedIndexes: shadowProcessedIndexes,
+          runIndexes: shadowRunIndexes,
+          plannedIndexes,
+          processOrderMatchesPlannedPrefix: shadowProcessedIndexes.every((index, position) => plannedIndexes[position] === index),
+          runOrderMatchesPlannedOrder: shadowRunIndexes.every((index, position) => index === shadowRunIndexes.slice().sort((a, b) => a - b)[position]),
+          maxActive: shadowRunIndexes.length > 0 ? 1 : 0,
+        },
+      }
+      ctx.trace.agentTrace?.recordEvent('tool_orchestration_plan', data)
+      await sessionEvent({
+        type: 'tool_orchestration_plan',
+        turnId,
+        message: 'Recorded prospective tool orchestration plan; execution remained serial.',
+        data,
+      })
+    }
+
+    const terminalResults = new Map<number, NormalizedToolResult>()
+    const materializeTerminal = async (
+      call: ToolCall,
+      index: number,
+      code: 'EARLIER_TOOL_BLOCKED' | 'SESSION_ABORTED' | 'EARLIER_TOOL_COMPLETED' | 'FATAL_TOOL_ERROR',
+      observation?: string,
+    ): Promise<NormalizedToolResult> => {
+      const existing = terminalResults.get(index)
+      if (existing) return existing
+      const now = new Date().toISOString()
+      const message = observation ?? `BLOCKED (${code}): ${syntheticTerminalMessage(code)}`
+      const error = createNormalizedToolError('tool_failed_observation', code, message, {
+        fatal: code === 'FATAL_TOOL_ERROR',
+      })
+      const result: NormalizedToolResult = {
+        schemaVersion: 'normalized-tool-result/v1',
+        toolCallId: call.id,
+        name: call.name,
+        args: call.arguments,
+        ok: false,
+        status: 'blocked',
+        observation: message,
+        pageChanged: false,
+        done: false,
+        error,
+        state: {
+          version: 1,
+          toolCallId: call.id,
+          name: call.name,
+          turnId,
+          step,
+          status: 'blocked',
+          attempts: 0,
+          queuedAt: now,
+          completedAt: now,
+          durationMs: 0,
+          error,
+        },
+        queuedAt: now,
+        completedAt: now,
+        durationMs: 0,
+      }
+      terminalResults.set(index, result)
+      await sessionTranscript({
+        type: 'tool_result',
+        turnId,
+        toolCallId: call.id,
+        name: call.name,
+        ok: false,
+        result: compactToolResult(toLegacyToolRunResult(result)),
+        error: message,
+      })
+      await sessionEvent({
+        type: 'tool_failed',
+        turnId,
+        toolCallId: call.id,
+        message: `${call.name} blocked: ${code}.`,
+        data: { name: call.name, synthetic: true, code, attempts: 0, originalIndex: index },
+      })
+      messages.push(toolMessage(call.id, message))
+      return result
+    }
+    const settleRemainingToolCalls = async (
+      startIndex: number,
+      code: 'EARLIER_TOOL_BLOCKED' | 'SESSION_ABORTED' | 'EARLIER_TOOL_COMPLETED' | 'FATAL_TOOL_ERROR',
+    ) => {
+      for (let index = startIndex; index < completion.toolCalls.length; index += 1) {
+        const call = completion.toolCalls[index]!
+        await materializeTerminal(call, index, code)
+      }
+    }
+    type ControlledToolCall = {
+      prepared: Deferred<PreparedToolCallV1>
+      run: Deferred<void>
+      runOutcome: Deferred<ToolRunOutcomeV1>
+      commit: Deferred<void>
+    }
+    const controlledCalls = new Map<number, {
+      control: ControlledToolCall
+      process: Promise<{
+        continueTurn: boolean
+        abortRequested?: boolean
+        stopCode?: 'EARLIER_TOOL_BLOCKED' | 'EARLIER_TOOL_COMPLETED' | 'FATAL_TOOL_ERROR'
+        fatalError?: Error
+      }>
+    }>()
+    const processSingleToolCall = async (
+      call: ToolCall,
+      index: number,
+      controlled?: ControlledToolCall,
+    ): Promise<{
+      continueTurn: boolean
+      abortRequested?: boolean
+      stopCode?: 'EARLIER_TOOL_BLOCKED' | 'EARLIER_TOOL_COMPLETED' | 'FATAL_TOOL_ERROR'
+      fatalError?: Error
+    }> => {
+      if (input.abortSignal?.aborted) return { continueTurn: false, abortRequested: true }
+      shadowProcessedIndexes.push(index)
+      // This remains serial in Wave 3. Keeping policy resolution at the
+      // preparation boundary makes the later orchestrator integration a pure
+      // scheduling change rather than a second policy path.
+      const prepareToolCall = async () => registry.resolveExecutionPolicy(call.name, call.arguments, ctx)
+      const executionPolicy = await prepareToolCall()
+      void executionPolicy
       if (call.name !== 'agent_done') clearRejectedAgentDoneGateStreak()
       toolCalls += 1
       const tool = registry.get(call.name)
@@ -1363,7 +1728,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       if (permissionDecision.action === 'deny') {
         const note = `BLOCKED by permission [${permissionDecision.ruleId}]. ${permissionDecision.reason}`
         const observation = noteWithPermission(note, policyDecision, permissionDecision)
-        messages.push(toolMessage(call.id, observation))
+        await materializeTerminal(call, index, 'EARLIER_TOOL_BLOCKED', observation)
         blockers.push(`${call.name}(${argBrief}) denied by ${permissionDecision.ruleId}: ${permissionDecision.reason}`)
         rememberRecentAction(recentActions, {
           step,
@@ -1386,7 +1751,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             permissionDecision,
             gateKind: permissionDecision.gateKind ?? policyDecision.gateKind,
           })
-          continue
+          return { continueTurn: true }
         }
         blocked = true
         done = true
@@ -1406,7 +1771,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           agentDoneBlocked: true,
         })
         emit('gate', `[permission:deny] ${call.name}(${argBrief})`, step)
-        break
+        return { continueTurn: false, stopCode: 'EARLIER_TOOL_BLOCKED' }
       }
 
       if (permissionDecision.action === 'allow') {
@@ -1482,7 +1847,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             ? 'FINAL_SUBMIT_NOT_EXECUTED_AUTOMATICALLY. The human approved awareness of this final-submit step, but the runtime will not click a true final-submit control. If this is actually an application-entry or review-step action, inspect the page and choose the correct non-final control; otherwise ask the human to complete the final submit manually, then continue observing or call agent_done.'
             : `FINAL_SUBMIT_NOT_EXECUTED_AUTOMATICALLY. The human chose ${decision} for this final-submit step. Do not retry this exact final-submit action; continue with any remaining safe checks or call agent_done if no safe work remains.`
           const observation = noteWithPermission(note, policyDecision, permissionDecision)
-          messages.push(toolMessage(call.id, observation))
+          await materializeTerminal(call, index, 'EARLIER_TOOL_BLOCKED', observation)
           if (decision !== 'approve') {
             blockers.push(`final_submit gate did not execute ${call.name}(${argBrief}) with decision=${decision}: ${permissionDecision.reason}`)
           }
@@ -1513,14 +1878,14 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             blocked = true
             done = true
             summary = `Human ${decision} the final_submit step.`
-            break
+            return { continueTurn: false, stopCode: 'EARLIER_TOOL_BLOCKED' }
           }
-          continue
+          return { continueTurn: true }
         }
         if (decision !== 'approve') {
           const note = `BLOCKED by human gate (${decision}). Do not retry this action; call agent_done if you cannot proceed.`
           const observation = noteWithPermission(note, policyDecision, permissionDecision)
-          messages.push(toolMessage(call.id, observation))
+          await materializeTerminal(call, index, 'EARLIER_TOOL_BLOCKED', observation)
           blockers.push(`${kind} gate stopped ${call.name}(${argBrief}) with decision=${decision}: ${permissionDecision.reason}`)
           rememberRecentAction(recentActions, {
             step,
@@ -1549,15 +1914,14 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
               gateDecision: decision,
               agentDoneBlocked: true,
             })
-            break
+            return { continueTurn: false, stopCode: 'EARLIER_TOOL_BLOCKED' }
           }
-          continue
+          return { continueTurn: true }
         }
         markConfirmed(call)
       }
 
-      const abortedBeforeExecution = await checkAbort(turnId)
-      if (abortedBeforeExecution) return abortedBeforeExecution
+      if (input.abortSignal?.aborted) return { continueTurn: false, abortRequested: true }
 
       let preAgentDoneWorkflowEvaluation: WorkflowEngineEvaluation | undefined
       if (call.name === 'agent_done') {
@@ -1573,6 +1937,43 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           permissionRequest,
           permissionDecision,
         })
+      }
+
+      const toolUseContext = {
+        schemaVersion: 'tool-use-context/v1' as const,
+        runId: session?.session.runId ?? ctx.trace.runId,
+        sessionId: session?.session.sessionId ?? ctx.sessionId,
+        turnId,
+        step,
+        toolCallId: call.id,
+        local: { ...ctx, ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}) },
+        abortSignal: input.abortSignal,
+        metadata: {
+          step,
+          riskLevel: policyDecision.riskLevel,
+          category: toolCategory,
+          argBrief,
+          policyAction: policyDecision.action,
+          policyCode: policyDecision.policyCode,
+          policyRuleId: policyDecision.ruleId,
+          policyGateKind: policyDecision.gateKind,
+          interruptBehavior: executionPolicy.interruptBehavior,
+        },
+      }
+      if (controlled) {
+        controlled.prepared.resolve({
+          schemaVersion: 'prepared-tool-call/v1',
+          index,
+          call,
+          executionPolicy,
+          risk,
+          policyDecision,
+          permissionRequest,
+          permissionDecision,
+          preparedAt: new Date().toISOString(),
+          context: toolUseContext,
+        })
+        await controlled.run.promise
       }
 
       emit('act', `${call.name}(${argBrief})`, step)
@@ -1598,39 +1999,54 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           policy: policyMetadata(policyDecision),
         },
       })
-      let result
-      let execution: NormalizedToolResult | undefined
-      try {
-        execution = await toolExecution.execute(
-          {
-            id: call.id,
-            name: call.name,
-            arguments: call.arguments,
-          },
-          {
-            schemaVersion: 'tool-use-context/v1',
-            runId: session?.session.runId ?? ctx.trace.runId,
-            sessionId: session?.session.sessionId ?? ctx.sessionId,
+      if (asyncTaskRuntime && isMainBrowserActionTool(call.name, toolCategory)) {
+        const actionClock = await asyncTaskRuntime.recordBrowserAction({
+          actionId: `${turnId}:${call.id}`,
+          source: {
+            kind: 'main_agent_browser_tool_started',
             turnId,
-            step,
             toolCallId: call.id,
-            local: { ...ctx, ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}) },
-            abortSignal: input.abortSignal,
-            metadata: {
-              step,
-              riskLevel: policyDecision.riskLevel,
-              category: toolCategory,
-              argBrief,
-              policyAction: policyDecision.action,
-              policyCode: policyDecision.policyCode,
-              policyRuleId: policyDecision.ruleId,
-              policyGateKind: policyDecision.gateKind,
-            },
+            toolName: call.name,
           },
-        )
+        })
+        await sessionEvent({
+          type: 'agent_task_action_clock_advanced',
+          turnId,
+          toolCallId: call.id,
+          message: `Async task action clock advanced to ${actionClock.currentActionSeq}.`,
+          data: { currentActionSeq: actionClock.currentActionSeq, toolName: call.name },
+        })
+      }
+      let result: LocalToolRunResult
+      let execution: NormalizedToolResult | undefined
+      let fatalExecutionError: Error | undefined
+      const runPreparedToolCall = async (): Promise<NormalizedToolResult> => {
+        if (executionPolicy.background === 'eligible') {
+          if (!input.backgroundToolBridge) throw new Error(`Background pilot is unavailable for ${call.name}.`)
+          const started = await input.backgroundToolBridge.start({
+            schemaVersion: 'prepared-tool-call/v1', index, call, executionPolicy, risk,
+            policyDecision, permissionRequest, permissionDecision,
+            preparedAt: new Date().toISOString(), context: toolUseContext,
+          })
+          const now = new Date().toISOString()
+          return {
+            schemaVersion: 'normalized-tool-result/v1', toolCallId: call.id, name: call.name,
+            args: call.arguments, ok: true, status: 'succeeded',
+            observation: `BACKGROUND_TASK_STARTED taskId=${started.taskId} status=${started.status}`,
+            data: started as unknown as Record<string, unknown>, pageChanged: false, done: false,
+            state: { version: 1, toolCallId: call.id, name: call.name, turnId, step, status: 'succeeded', attempts: 1, queuedAt: now, startedAt: now, completedAt: now, durationMs: 0 },
+            queuedAt: now, startedAt: now, completedAt: now, durationMs: 0,
+          }
+        }
+        return toolExecution.execute({ id: call.id, name: call.name, arguments: call.arguments }, toolUseContext)
+      }
+      try {
+        shadowRunIndexes.push(index)
+        execution = await runPreparedToolCall()
         if (execution.error?.fatal) {
-          if (execution.error.cause instanceof Error) throw execution.error.cause
-          throw new Error(execution.error.message)
+          fatalExecutionError = execution.error.cause instanceof Error
+            ? execution.error.cause
+            : new Error(execution.error.message)
         }
         result = toLegacyToolRunResult(execution)
         toolSpan?.end({
@@ -1648,38 +2064,47 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           errorMessage: error instanceof Error ? error.message : String(error),
         })
         const message = error instanceof Error ? error.message : String(error)
-        await sessionTranscript({
-          type: 'tool_result',
-          turnId,
+        fatalExecutionError = error instanceof Error ? error : new Error(message)
+        const now = new Date().toISOString()
+        execution = {
+          schemaVersion: 'normalized-tool-result/v1',
           toolCallId: call.id,
           name: call.name,
+          args: call.arguments,
           ok: false,
-          error: message,
-        })
-        ctx.trace.agentTrace?.recordEvent('tool_result', {
-          step,
-          turnId,
-          toolName: call.name,
-          toolCallId: call.id,
-          ok: false,
-          error: message,
-        })
-        await sessionEvent({
-          type: 'tool_failed',
-          turnId,
-          toolCallId: call.id,
-          message: `${call.name} failed: ${message}`,
-          data: { name: call.name },
-        })
-        await sessionTranscript({
-          type: 'error',
-          turnId,
-          message,
-          ...(error instanceof Error && error.stack ? { stack: error.stack } : {}),
-        })
-        await finalizeSession('failed', { steps: step, toolCalls, toolName: call.name, error: message, workflowState, runMemory: compactRunMemory(runMemory) }, message)
-        throw error
+          status: 'failed',
+          observation: `FAILED (FATAL_TOOL_ERROR): ${message}`,
+          pageChanged: false,
+          done: false,
+          error: createNormalizedToolError('registry_exception', 'FATAL_TOOL_ERROR', message, { fatal: true, cause: error }),
+          state: {
+            version: 1,
+            toolCallId: call.id,
+            name: call.name,
+            turnId,
+            step,
+            status: 'failed',
+            attempts: 1,
+            queuedAt: now,
+            completedAt: now,
+            durationMs: 0,
+          },
+          queuedAt: now,
+          completedAt: now,
+          durationMs: 0,
+        }
+        result = toLegacyToolRunResult(execution)
       }
+      if (controlled && execution) {
+        controlled.runOutcome.resolve({
+          schemaVersion: 'tool-run-outcome/v1',
+          index,
+          prepared: await controlled.prepared.promise,
+          execution,
+        })
+        await controlled.commit.promise
+      }
+      const commitToolOutcome = async () => {
       const toolOk = execution?.ok ?? !result.observation.startsWith('FAILED')
       if (call.name === 'plan_form_fill' && toolOk && isFieldPlan(result.data)) {
         ctx.fieldPlan = result.data
@@ -1837,6 +2262,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       let completionGateBlockSummary: string | undefined
       let rejectedPrematureAgentDone = false
       if (call.name === 'agent_done' && result.done && call.arguments.blocked === true) {
+        const mainCompletionReadiness = await asyncCompletionReadiness()
         const preAgentDoneGateDecision = completionGate.evaluate({
           done,
           blocked,
@@ -1851,6 +2277,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           currentResumeUploaded,
           taskType,
           source: 'agent_done',
+          asyncTaskRuntimeEnabled: Boolean(asyncTaskRuntime),
+          ...(mainCompletionReadiness ? { mainCompletionReadiness } : {}),
+          summaryAuthority: 'main_agent',
         })
 
         if (preAgentDoneGateDecision.action === 'reject') {
@@ -1895,6 +2324,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           ...(result.done ? { agentDoneBlocked: blocked } : {}),
         })
         if (call.name === 'agent_done' && result.done) {
+          const mainCompletionReadiness = await asyncCompletionReadiness()
           completionGateDecision = completionGate.evaluate({
             done,
             blocked,
@@ -1909,6 +2339,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             currentResumeUploaded,
             taskType,
             source: 'agent_done',
+            asyncTaskRuntimeEnabled: Boolean(asyncTaskRuntime),
+            ...(mainCompletionReadiness ? { mainCompletionReadiness } : {}),
+            summaryAuthority: 'main_agent',
           })
           await recordCompletionGateDecision(completionGateDecision, step, { toolCallId: call.id })
 
@@ -1981,8 +2414,148 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       messages.push(toolMessage(call.id, toolMessageContentWithArtifact(observation, resultArtifact)))
       emit('observe', result.observation.replace(/\s+/g, ' ').slice(0, 160), step)
 
-      if (done) break
+      }
+      await commitToolOutcome()
+      return {
+        continueTurn: !done && !fatalExecutionError,
+        ...(fatalExecutionError
+          ? { stopCode: 'FATAL_TOOL_ERROR' as const, fatalError: fatalExecutionError }
+          : done ? { stopCode: 'EARLIER_TOOL_COMPLETED' as const } : {}),
+      }
     }
+
+    let orchestratedFatalError: Error | undefined
+    const trustedResumeParallel = isTrustedResumeQueryParallelConfig(toolOrchestration)
+    if (toolOrchestration.mode === 'parallel' && trustedResumeParallel) {
+      const orchestrationDiagnostics: ToolBatchDiagnosticV1[] = []
+      const orchestration = await orchestrateToolCalls(completion.toolCalls, {
+        prepare: async (call, index): Promise<ToolPrepareOutcomeV1> => {
+          const control: ControlledToolCall = {
+            prepared: new Deferred<PreparedToolCallV1>(),
+            run: new Deferred<void>(),
+            runOutcome: new Deferred<ToolRunOutcomeV1>(),
+            commit: new Deferred<void>(),
+          }
+          const process = processSingleToolCall(call, index, control)
+          controlledCalls.set(index, { control, process })
+          const prepared = await Promise.race([
+            control.prepared.promise.then((value) => ({ kind: 'ready' as const, value })),
+            process.then((value) => ({ kind: 'terminal' as const, value })),
+          ])
+          if (prepared.kind === 'ready') {
+            return { schemaVersion: 'tool-prepare-outcome/v1', kind: 'ready', index, prepared: prepared.value }
+          }
+          const outcome = prepared.value
+          const result = terminalResults.get(index) ?? await materializeTerminal(
+            call,
+            index,
+            outcome.abortRequested ? 'SESSION_ABORTED' : outcome.stopCode ?? 'EARLIER_TOOL_BLOCKED',
+          )
+          return {
+            schemaVersion: 'tool-prepare-outcome/v1',
+            kind: 'terminal',
+            index,
+            call,
+            result,
+            stop: {
+              stopBatch: !outcome.continueTurn,
+              stopTurn: !outcome.continueTurn,
+              ...(outcome.abortRequested ? { reason: 'SESSION_ABORTED' as const }
+                : outcome.fatalError ? { reason: 'FATAL_TOOL_ERROR' as const }
+                  : !outcome.continueTurn ? { reason: 'POLICY_DENIED' as const } : {}),
+            },
+          }
+        },
+        run: async (prepared): Promise<ToolRunOutcomeV1> => {
+          const controlled = controlledCalls.get(prepared.index)
+          if (!controlled) throw new Error(`Missing controlled tool call for index ${prepared.index}.`)
+          controlled.control.run.resolve()
+          return controlled.control.runOutcome.promise
+        },
+        commit: async (outcome): Promise<ToolCommitOutcomeV1> => {
+          const controlled = controlledCalls.get(outcome.index)
+          if (!controlled) {
+            const terminal = outcome as Extract<ToolPrepareOutcomeV1, { kind: 'terminal' }>
+            return {
+              schemaVersion: 'tool-commit-outcome/v1',
+              index: terminal.index,
+              committedToolCallId: terminal.call.id,
+              continueTurn: !terminal.stop.stopTurn,
+              done,
+              blocked,
+              ...(terminal.stop.reason ? { stopReason: terminal.stop.reason } : {}),
+            }
+          }
+          controlled.control.commit.resolve()
+          const processOutcome = await controlled.process
+          if (processOutcome.fatalError) orchestratedFatalError ??= processOutcome.fatalError
+          return {
+            schemaVersion: 'tool-commit-outcome/v1',
+            index: outcome.index,
+            committedToolCallId: 'prepared' in outcome ? outcome.prepared.call.id : outcome.call.id,
+            continueTurn: processOutcome.continueTurn,
+            done,
+            blocked,
+            ...(processOutcome.abortRequested ? { stopReason: 'SESSION_ABORTED' as const }
+              : processOutcome.fatalError ? { stopReason: 'FATAL_TOOL_ERROR' as const }
+                : !processOutcome.continueTurn ? { stopReason: 'TOOL_DONE' as const } : {}),
+          }
+        },
+      }, {
+        turnId,
+        sessionId: ctx.sessionId,
+        mode: 'parallel',
+        maxConcurrency: toolOrchestration.maxConcurrency,
+        maxConcurrencyUpperBound: MAX_TOOL_ORCHESTRATION_CONCURRENCY,
+        abortSignal: input.abortSignal,
+        resolvePolicy: (call) => resolveTrustedParallelExecutionPolicy(registry, call, ctx, trustedResumeParallel),
+        materializeTerminal: async (proposal: ToolTerminalProposalV1) => ({
+          schemaVersion: 'tool-prepare-outcome/v1',
+          kind: 'terminal',
+          index: proposal.index,
+          call: proposal.call,
+          result: await materializeTerminal(proposal.call, proposal.index, terminalCodeForProposal(proposal)),
+          stop: { stopBatch: true, stopTurn: true, reason: stopReasonForProposal(proposal) },
+        }),
+        onDiagnostic: (diagnostic) => orchestrationDiagnostics.push(diagnostic),
+      })
+      if (orchestrationDiagnostics.length > 0) {
+        await sessionEvent({
+          type: 'tool_orchestration_plan',
+          turnId,
+          message: 'Orchestration downgraded one or more calls to exclusive execution.',
+          data: { schemaVersion: 'tool-orchestration-downgrade/v1', canonical: false, diagnostics: orchestrationDiagnostics, effectiveMode: 'parallel' },
+        })
+      }
+      if (input.abortSignal?.aborted) {
+        await recordShadowPlanDiagnostic()
+        return abortRun(turnId)
+      }
+    } else {
+      for (const [index, call] of completion.toolCalls.entries()) {
+        const outcome = await processSingleToolCall(call, index)
+        if (outcome.abortRequested) {
+          await settleRemainingToolCalls(index, 'SESSION_ABORTED')
+          await recordShadowPlanDiagnostic()
+          return abortRun(turnId)
+        }
+        if (!outcome.continueTurn) {
+          await settleRemainingToolCalls(index + 1, outcome.stopCode ?? 'EARLIER_TOOL_BLOCKED')
+          if (outcome.fatalError) orchestratedFatalError = outcome.fatalError
+          break
+        }
+      }
+    }
+
+    if (orchestratedFatalError) {
+      const message = orchestratedFatalError.message
+      await sessionTranscript({ type: 'error', turnId, message, ...(orchestratedFatalError.stack ? { stack: orchestratedFatalError.stack } : {}) })
+      await finalizeSession('failed', { steps: step, toolCalls, error: message, workflowState, runMemory: compactRunMemory(runMemory) }, message)
+      await recordShadowPlanDiagnostic()
+      throw orchestratedFatalError
+    }
+
+    await recordShadowPlanDiagnostic()
 
     if (!done) {
       latestContext = await refreshLoopContext('Context refresh updated prompt context.', step)
@@ -2063,9 +2636,116 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   return { steps: step, toolCalls, done, blocked, summary, workflowState }
 }
 
-export function toolsForSafetyMode(registry: ToolRegistry, safetyMode: 'guarded' | 'raw'): ReturnType<ToolRegistry['toOpenAITools']> {
-  if (safetyMode === 'raw') return registry.toOpenAITools({ exclude: RAW_MODE_EXCLUDED_TOOLS })
-  return registry.toOpenAITools()
+function resolveToolOrchestrationOptions(
+  requested: AgentLoopInput['toolOrchestration'],
+): ToolOrchestrationOptions {
+  const mode = requested?.mode
+  const configuredMode: ToolOrchestrationMode = mode === 'legacy' || mode === 'shadow' || mode === 'serial' || mode === 'parallel'
+    ? mode
+    : DEFAULT_TOOL_ORCHESTRATION_OPTIONS.mode
+  const configuredAllowlist = Array.isArray(requested?.parallelAllowlist)
+    ? [...requested.parallelAllowlist].filter((name): name is string => typeof name === 'string')
+    : [...DEFAULT_TOOL_ORCHESTRATION_OPTIONS.parallelAllowlist]
+  const trustedResumeParallel = configuredAllowlist.length === 1 && configuredAllowlist[0] === 'resume_query'
+  const safeMode: ToolOrchestrationMode = configuredMode === 'parallel' && !trustedResumeParallel ? 'serial' : configuredMode
+  const requestedConcurrency = requested?.maxConcurrency
+  const configuredMaxConcurrency = typeof requestedConcurrency === 'number' && Number.isFinite(requestedConcurrency)
+    ? Math.min(MAX_TOOL_ORCHESTRATION_CONCURRENCY, Math.max(1, Math.floor(requestedConcurrency)))
+    : DEFAULT_TOOL_ORCHESTRATION_OPTIONS.maxConcurrency
+  const maxConcurrency = safeMode === 'shadow' || safeMode === 'parallel' ? configuredMaxConcurrency : 1
+  return {
+    mode: safeMode,
+    maxConcurrency,
+    parallelAllowlist: safeMode === 'parallel' ? configuredAllowlist : [],
+  }
+}
+
+/** A small deferred is used only to let O4 schedule the three existing Loop phases. */
+class Deferred<T> {
+  readonly promise: Promise<T>
+  private settled = false
+  private settle!: (value: T) => void
+
+  constructor() {
+    this.promise = new Promise<T>((resolve) => { this.settle = resolve })
+  }
+
+  resolve(value: T): void {
+    if (this.settled) return
+    this.settled = true
+    this.settle(value)
+  }
+}
+
+/**
+ * Runtime configuration is not an authorization surface.  The sole Wave-5
+ * grant is exactly one trusted name; an empty, duplicated, or wider list has
+ * no parallel effect.
+ */
+function isTrustedResumeQueryParallelConfig(options: ToolOrchestrationOptions): boolean {
+  return options.parallelAllowlist.length === 1 && options.parallelAllowlist[0] === 'resume_query'
+}
+
+function resolveTrustedParallelExecutionPolicy(
+  registry: ToolRegistry,
+  call: ToolCall,
+  ctx: ToolContext,
+  trustedResumeQueryParallel: boolean,
+): ResolvedToolExecutionPolicyV1 {
+  let resolved: ResolvedToolExecutionPolicyV1
+  try {
+    resolved = registry.resolveExecutionPolicy(call.name, call.arguments, ctx)
+  } catch {
+    return { ...FAIL_CLOSED_TOOL_EXECUTION_POLICY_V1 }
+  }
+  const allowed = trustedResumeQueryParallel && call.name === 'resume_query' &&
+    resolved.foreground === 'parallel' && resolved.resource === 'none' &&
+    resolved.interruptBehavior === 'cancel' && resolved.background === 'never'
+  return allowed ? resolved : { ...FAIL_CLOSED_TOOL_EXECUTION_POLICY_V1 }
+}
+
+function terminalCodeForProposal(proposal: ToolTerminalProposalV1):
+  'EARLIER_TOOL_BLOCKED' | 'SESSION_ABORTED' | 'EARLIER_TOOL_COMPLETED' | 'FATAL_TOOL_ERROR' {
+  switch (proposal.code) {
+    case 'SESSION_ABORTED': return 'SESSION_ABORTED'
+    case 'EARLIER_TOOL_COMPLETED': return 'EARLIER_TOOL_COMPLETED'
+    case 'TOOL_COMMIT_FAILED':
+    case 'ORCHESTRATOR_INTERNAL_ERROR': return 'FATAL_TOOL_ERROR'
+    default: return 'EARLIER_TOOL_BLOCKED'
+  }
+}
+
+function stopReasonForProposal(proposal: ToolTerminalProposalV1):
+  'POLICY_DENIED' | 'SESSION_ABORTED' | 'TOOL_DONE' | 'FATAL_TOOL_ERROR' | 'COMMIT_FAILED' | 'ORCHESTRATOR_INTERNAL_ERROR' {
+  switch (proposal.code) {
+    case 'SESSION_ABORTED': return 'SESSION_ABORTED'
+    case 'EARLIER_TOOL_COMPLETED': return 'TOOL_DONE'
+    case 'TOOL_COMMIT_FAILED': return 'COMMIT_FAILED'
+    case 'ORCHESTRATOR_INTERNAL_ERROR': return 'ORCHESTRATOR_INTERNAL_ERROR'
+    default: return 'POLICY_DENIED'
+  }
+}
+
+const ASYNC_TASK_TOOL_NAMES = [
+  'agent_task_spawn',
+  'agent_task_status',
+  'agent_task_wait',
+  'agent_task_result',
+  'agent_task_cancel',
+] as const
+
+function isMainBrowserActionTool(toolName: string, category: string | undefined): boolean {
+  return category === 'action' && toolName.startsWith('browser_')
+}
+
+export function toolsForSafetyMode(
+  registry: ToolRegistry,
+  safetyMode: 'guarded' | 'raw',
+  asyncTaskRuntimeEnabled = false,
+): ReturnType<ToolRegistry['toOpenAITools']> {
+  const excluded = new Set<string>(safetyMode === 'raw' ? RAW_MODE_EXCLUDED_TOOLS : [])
+  if (!asyncTaskRuntimeEnabled) for (const name of ASYNC_TASK_TOOL_NAMES) excluded.add(name)
+  return registry.toOpenAITools({ exclude: excluded })
 }
 
 function turnIdForStep(step: number): string {
@@ -2259,6 +2939,12 @@ async function buildLoopContextWithWorkflow(
   blockers: string[],
 ) {
   const relevantMemories = await relevantMemoriesFor(input)
+  const agentTasks = input.ctx.asyncTaskRuntime
+    ? renderAgentTasksPromptContent(
+        buildAgentTasksPromptSummary(await input.ctx.asyncTaskRuntime.snapshot()),
+        { maxChars: 1600 },
+      )
+    : undefined
   return buildLoopContext(
     {
       goal: input.goal,
@@ -2273,6 +2959,7 @@ async function buildLoopContextWithWorkflow(
       fieldPlan: input.ctx.fieldPlan ?? input.fieldPlan,
       fillLedgerSummary: input.ctx.fillLedgerSummary ?? input.fillLedgerSummary ?? workflowState.fillLedgerSummary,
       answerSummary: summarizeAnswerStore(input.ctx.answerStore),
+      agentTasks,
     },
     recentActions,
     blockersWithWorkflow(blockers, workflowState),
@@ -2984,4 +3671,15 @@ function compactWorkflowEvidenceData(value: unknown): unknown {
 function truncateForWorkflowEvidence(value: string, maxLength = 500): string {
   if (value.length <= maxLength) return value
   return `${value.slice(0, maxLength - 1)}…`
+}
+
+function syntheticTerminalMessage(
+  code: 'EARLIER_TOOL_BLOCKED' | 'SESSION_ABORTED' | 'EARLIER_TOOL_COMPLETED' | 'FATAL_TOOL_ERROR',
+): string {
+  switch (code) {
+    case 'SESSION_ABORTED': return 'The session was aborted before this declared tool call could run.'
+    case 'EARLIER_TOOL_COMPLETED': return 'An earlier tool completed the turn before this declared tool call could run.'
+    case 'FATAL_TOOL_ERROR': return 'An earlier tool failed fatally before this declared tool call could run.'
+    case 'EARLIER_TOOL_BLOCKED': return 'An earlier tool was blocked, so this declared tool call was not run.'
+  }
 }

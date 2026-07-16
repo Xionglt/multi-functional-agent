@@ -30,6 +30,7 @@ interface AgentTraceSpanJson {
   toolName?: string
   toolCategory?: string
   status?: string
+  parentSpanId?: string | null
 }
 
 interface LegacyTraceStepJson {
@@ -104,37 +105,74 @@ function applySpansJsonl(metrics: RunMetrics, inputs: ResolvedTraceInputs): void
   let skillCalls = 0
   let screenshots = 0
 
-  for (const span of readJsonl<AgentTraceSpanJson>(spansFile, metrics)) {
+  const spansList = readJsonl<AgentTraceSpanJson>(spansFile, metrics)
+  const directMcpCounts = countDirectMcpTools(spansList)
+  const reconstructedMcpSeen = new Map<string, number>()
+
+  for (const span of spansList) {
     spans += 1
     const spanType = span.spanType || ''
     const toolName = span.toolName || span.name || ''
+    const duplicateReconstructedMcp = isDuplicateReconstructedMcp(span, toolName, directMcpCounts, reconstructedMcpSeen)
     if (spanType === 'llm_call') llmCalls += 1
     if (spanType === 'tool_call') {
       toolCalls += 1
       incrementToolCategory(metrics, resolveToolCategory(toolName, span.toolCategory))
     }
-    if (spanType === 'mcp_tool_call') {
+    if (spanType === 'mcp_tool_call' && !duplicateReconstructedMcp) {
       mcpToolCalls += 1
       incrementToolCategory(metrics, resolveToolCategory(toolName, span.toolCategory))
     }
     if (spanType === 'skill_call') skillCalls += 1
     if (spanType === 'screenshot') screenshots += 1
 
-    if (isBrowserTool(toolName, 'snapshot')) metrics.browserSnapshots += 1
-    if (isBrowserTool(toolName, 'click')) metrics.browserClicks += 1
-    if (isBrowserTool(toolName, 'type') || isBrowserTool(toolName, 'fill')) metrics.browserTypes += 1
-    if (isBrowserTool(toolName, 'wait')) metrics.browserWaits += 1
-    if (isBrowserTool(toolName, 'screenshot')) metrics.screenshots += 1
-    if (spanType === 'gate' || /handoff|manual/i.test(toolName)) metrics.manualHandoffs += 1
+    if (!duplicateReconstructedMcp) {
+      if (isBrowserTool(toolName, 'snapshot')) metrics.browserSnapshots += 1
+      if (isBrowserTool(toolName, 'click')) metrics.browserClicks += 1
+      if (isBrowserTool(toolName, 'type') || isBrowserTool(toolName, 'fill')) metrics.browserTypes += 1
+      if (isBrowserTool(toolName, 'wait')) metrics.browserWaits += 1
+      if (isBrowserTool(toolName, 'screenshot')) metrics.screenshots += 1
+      if (spanType === 'gate' || isManualHandoffSpan(toolName)) metrics.manualHandoffs += 1
+    }
     if (span.status === 'failed' && metrics.status === 'unknown') metrics.status = 'failed'
   }
 
   metrics.spans = Math.max(metrics.spans, spans)
   metrics.llmCalls = Math.max(metrics.llmCalls, llmCalls)
   metrics.toolCalls = Math.max(metrics.toolCalls, toolCalls)
-  metrics.mcpToolCalls = Math.max(metrics.mcpToolCalls, mcpToolCalls)
+  metrics.mcpToolCalls = mcpToolCalls
   metrics.skillCalls = Math.max(metrics.skillCalls, skillCalls)
   metrics.screenshots = Math.max(metrics.screenshots, screenshots)
+}
+
+function countDirectMcpTools(spans: AgentTraceSpanJson[]): Map<string, number> {
+  const counts = new Map<string, number>()
+  for (const span of spans) {
+    if (span.spanType !== 'mcp_tool_call') continue
+    const toolName = span.toolName || span.name || ''
+    if (!toolName || toolName.startsWith('mcp__')) continue
+    const canonical = canonicalMcpToolName(toolName)
+    counts.set(canonical, (counts.get(canonical) ?? 0) + 1)
+  }
+  return counts
+}
+
+function isDuplicateReconstructedMcp(
+  span: AgentTraceSpanJson,
+  toolName: string,
+  directCounts: Map<string, number>,
+  reconstructedSeen: Map<string, number>,
+): boolean {
+  if (span.spanType !== 'mcp_tool_call' || !toolName.startsWith('mcp__')) return false
+  const canonical = canonicalMcpToolName(toolName)
+  const seen = (reconstructedSeen.get(canonical) ?? 0) + 1
+  reconstructedSeen.set(canonical, seen)
+  return seen <= (directCounts.get(canonical) ?? 0)
+}
+
+function canonicalMcpToolName(toolName: string): string {
+  const parts = toolName.split('__').filter(Boolean)
+  return parts.at(-1) || toolName
 }
 
 function applyEventsJsonl(metrics: RunMetrics, inputs: ResolvedTraceInputs): void {
@@ -143,8 +181,7 @@ function applyEventsJsonl(metrics: RunMetrics, inputs: ResolvedTraceInputs): voi
 
   for (const event of readJsonl<AgentTraceEventJson>(eventsFile, metrics)) {
     metrics.events += 1
-    const hay = JSON.stringify(event)
-    if (/handoff|manual|WEB_HANDOFF_WAITING/i.test(hay)) metrics.manualHandoffs += 1
+    if (isManualHandoffEvent(event.event)) metrics.manualHandoffs += 1
     applyPolicyDecisionEvent(metrics, event)
     applyPermissionDecisionEvent(metrics, event)
     applyContextSelectionEvent(metrics, event)
@@ -153,6 +190,15 @@ function applyEventsJsonl(metrics: RunMetrics, inputs: ResolvedTraceInputs): voi
     applyToolResultEvent(metrics, event)
     applyContextCompactionEvent(metrics, event)
   }
+}
+
+function isManualHandoffSpan(toolName: string): boolean {
+  return /^(?:(?:manual|human)[_-]handoff(?:$|[_-])|handoff[_-](?:waiting|requested)$)/i.test(toolName)
+}
+
+function isManualHandoffEvent(eventName: string | undefined): boolean {
+  if (!eventName) return false
+  return /^(?:WEB_HANDOFF_WAITING|manual_handoff_start|human_handoff_requested|handoff_requested)$/i.test(eventName)
 }
 
 function applyPolicyDecisionEvent(metrics: RunMetrics, event: AgentTraceEventJson): void {

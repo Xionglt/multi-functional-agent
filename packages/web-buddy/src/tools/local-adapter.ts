@@ -31,6 +31,9 @@ import type { RiskLevel, TraceRecorder } from '../sdk/trace.js'
 import { pageView } from '../runtime/local/page-view.js'
 import { listLocalToolDefs } from './catalog.js'
 import type { ToolCategory, ToolDef as CatalogToolDef } from './types.js'
+import type { ToolExecutionPolicyResolverV1, ToolExecutionPolicyV1 } from './tool-execution-policy.js'
+import type { AsyncTaskRuntime } from '../agents/async-task-runtime.js'
+import type { JsonValue } from '../agents/async-task-contracts.js'
 
 export interface LocalToolContext {
   sessionId: string
@@ -43,6 +46,8 @@ export interface LocalToolContext {
   humanInput?: Partial<HumanInput>
   llm?: Pick<LlmGateway, 'hasKey' | 'generateJson'>
   abortSignal?: AbortSignal
+  /** Optional session-scoped background task control plane. */
+  asyncTaskRuntime?: AsyncTaskRuntime
 }
 
 export interface LocalToolRunResult {
@@ -59,7 +64,10 @@ export interface LocalToolDef {
   category: ToolCategory
   parameters: Record<string, unknown>
   inherentRisk?: RiskLevel
+  execution: ToolExecutionPolicyV1
   metadata?: Record<string, unknown>
+  /** Synchronous v1 override only; Promise-like output fails closed. */
+  resolveExecution?: ToolExecutionPolicyResolverV1
   resolveRisk?: (args: Record<string, unknown>, ctx: LocalToolContext) => RiskLevel | undefined
   run: (args: Record<string, unknown>, ctx: LocalToolContext) => Promise<LocalToolRunResult>
 }
@@ -92,6 +100,99 @@ const HIGH_RISK_TEXT = [
 ]
 
 const localHandlers: Record<string, LocalHandler> = {
+  async trace_summarization() {
+    // This handler is a fail-closed fallback. An enabled Wave-6 call is
+    // intercepted by Agent Loop and dispatched through BackgroundToolBridge.
+    return { observation: 'FAILED (BACKGROUND_BRIDGE_REQUIRED): trace_summarization requires the enabled background pilot bridge.' }
+  },
+  async agent_task_spawn(args, ctx) {
+    const runtime = requireAsyncTaskRuntime(ctx)
+    if (!runtime) return asyncTaskUnavailable()
+    try {
+      const requiredForCompletion = Boolean(args.requiredForCompletion)
+      const terminalPolicy: 'must_complete_successfully' | 'terminal_is_sufficient' = requiredForCompletion
+        ? (args.terminalPolicy === 'terminal_is_sufficient' ? 'terminal_is_sufficient' : 'must_complete_successfully')
+        : 'must_complete_successfully'
+      const goal = String(args.goal ?? '').trim()
+      const artifactIds = stringArray(args.artifactIds)
+      const kind = String(args.kind ?? '')
+      const currentActionSeq = (await runtime.snapshot()).actionClock.currentActionSeq
+      const resolution = await runtime.spawn({
+        kind: kind as never,
+        title: String(args.title ?? '').trim(),
+        idempotencyKey: String(args.idempotencyKey ?? '').trim(),
+        blockedBy: stringArray(args.blockedBy),
+        inputs: [{
+          kind: 'goal',
+          structuredValue: {
+            goal,
+            ...(artifactIds.length ? { requestedArtifactIds: artifactIds } : {}),
+          } as JsonValue,
+        }],
+        completionRequirement: requiredForCompletion
+          ? { requiredForCompletion: true, terminalPolicy }
+          : { requiredForCompletion: false, terminalPolicy: 'does_not_block' },
+        actionBinding: kind === 'memory_retrieval'
+          ? { kind: 'not_action_bound' }
+          : { kind: 'browser_action', sourceActionSeq: currentActionSeq },
+      })
+      return asyncTaskResult(`agent_task_spawn: ${resolution.outcome}`, resolution)
+    } catch (error) {
+      return asyncTaskFailure('agent_task_spawn', error)
+    }
+  },
+
+  async agent_task_status(args, ctx) {
+    const runtime = requireAsyncTaskRuntime(ctx)
+    if (!runtime) return asyncTaskUnavailable()
+    try {
+      const taskId = optionalString(args.taskId)
+      const data = taskId ? await runtime.status(taskId) : await runtime.list()
+      return asyncTaskResult(`agent_task_status: ${taskId ?? 'all'}`, data)
+    } catch (error) {
+      return asyncTaskFailure('agent_task_status', error)
+    }
+  },
+
+  async agent_task_wait(args, ctx) {
+    const runtime = requireAsyncTaskRuntime(ctx)
+    if (!runtime) return asyncTaskUnavailable()
+    try {
+      const taskId = optionalString(args.taskId)
+      const timeoutMs = positiveInt(args.timeoutMs, 5_000)
+      if (taskId) {
+        const data = await runtime.wait(taskId, timeoutMs, ctx.abortSignal)
+        return asyncTaskResult(`agent_task_wait: ${data.waitOutcome}`, data)
+      }
+      const waitOutcome = await runtime.waitForChange(runtime.sessionId, ctx.abortSignal ?? new AbortController().signal, timeoutMs)
+      return asyncTaskResult(`agent_task_wait: ${waitOutcome}`, { waitOutcome, tasks: await runtime.list() })
+    } catch (error) {
+      return asyncTaskFailure('agent_task_wait', error)
+    }
+  },
+
+  async agent_task_result(args, ctx) {
+    const runtime = requireAsyncTaskRuntime(ctx)
+    if (!runtime) return asyncTaskUnavailable()
+    try {
+      const data = await runtime.result(String(args.taskId ?? ''))
+      return asyncTaskResult(`agent_task_result: ${data.status}`, data)
+    } catch (error) {
+      return asyncTaskFailure('agent_task_result', error)
+    }
+  },
+
+  async agent_task_cancel(args, ctx) {
+    const runtime = requireAsyncTaskRuntime(ctx)
+    if (!runtime) return asyncTaskUnavailable()
+    try {
+      const data = await runtime.cancel(String(args.taskId ?? ''))
+      return asyncTaskResult(`agent_task_cancel: changed=${data.changed}`, data)
+    } catch (error) {
+      return asyncTaskFailure('agent_task_cancel', error)
+    }
+  },
+
   async browser_open(args, ctx) {
     const r = await browserOpen({ url: String(args.url), waitUntil: args.waitUntil as never, sessionId: ctx.sessionId })
     if (!r.ok) return toResult(r, undefined, false)
@@ -466,6 +567,45 @@ const localHandlers: Record<string, LocalHandler> = {
   },
 }
 
+function requireAsyncTaskRuntime(ctx: LocalToolContext): AsyncTaskRuntime | undefined {
+  return ctx.asyncTaskRuntime
+}
+
+function asyncTaskUnavailable(): LocalToolRunResult {
+  return {
+    observation: 'FAILED (ASYNC_TASK_RUNTIME_UNAVAILABLE): This run has no background task runtime attached.',
+    pageChanged: false,
+  }
+}
+
+function asyncTaskResult(observation: string, data: unknown): LocalToolRunResult {
+  let serialized = ''
+  try {
+    serialized = JSON.stringify(data)
+  } catch {
+    serialized = String(data)
+  }
+  const bounded = serialized.length > 12_000 ? `${serialized.slice(0, 12_000)}...[truncated]` : serialized
+  return { observation: bounded ? `${observation}\n${bounded}` : observation, data, pageChanged: false }
+}
+
+function asyncTaskFailure(toolName: string, error: unknown): LocalToolRunResult {
+  const candidate = error as { code?: unknown; message?: unknown }
+  const code = typeof candidate?.code === 'string' ? candidate.code : 'ASYNC_TASK_ERROR'
+  const message = typeof candidate?.message === 'string' ? candidate.message : String(error)
+  return { observation: `FAILED (${code}): ${toolName}: ${message}`, pageChanged: false }
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? [...new Set(value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean))]
+    : []
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
 function positiveInt(value: unknown, fallback: number): number {
   const parsed = Number(value)
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback
@@ -615,6 +755,7 @@ export function createLocalTools(defs: CatalogToolDef[] = listLocalToolDefs()): 
       category: def.category,
       parameters: stripSessionParameter(def.parameters),
       inherentRisk: def.risk,
+      execution: def.execution,
       metadata: def.metadata,
       resolveRisk: localRiskResolver(def),
       run: handler,

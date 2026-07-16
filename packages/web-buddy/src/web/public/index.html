@@ -48,8 +48,10 @@
   input:focus, textarea:focus, select:focus { border-color: #6ea5ff; }
   .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: #0f1116; padding: 4px; border-radius: 8px; border: 1px solid #303541; }
   .seg.runtime { grid-template-columns: 1fr 1fr 1fr; }
+  .seg.preset { grid-template-columns: 1fr 1fr 1fr; }
   .seg button { border: 0; border-radius: 6px; background: transparent; color: #aeb6c5; padding: 7px 8px; cursor: pointer; }
   .seg button.on { background: #eef1f6; color: #111318; }
+  .group.is-disabled { opacity: .5; }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .check { display: flex; gap: 8px; align-items: center; color: #b8c0cc; margin-top: 8px; }
   .check input { width: auto; }
@@ -159,9 +161,10 @@
     </div>
 
     <div class="group">
-      <div class="label"><span>Preset</span><span>Claude</span></div>
-      <div class="seg" id="presetSeg">
+      <div class="label"><span>Scenario</span><span>preset</span></div>
+      <div class="seg preset" id="presetSeg">
         <button data-v="generic" class="on">Generic</button>
+        <button data-v="venue">Venue</button>
         <button data-v="alibaba">Alibaba</button>
       </div>
     </div>
@@ -176,14 +179,14 @@
       <textarea id="prompt"></textarea>
     </div>
 
-    <div class="group">
+    <div class="group" id="resumeGroup">
       <div class="label"><span>Resume</span><span>optional</span></div>
       <input id="resumePath" placeholder="/path/to/resume.pdf" />
       <div class="row" style="margin-top:8px">
         <input type="file" id="resumeFile" accept=".pdf,.json,.txt" />
         <button class="btn secondary" id="uploadBtn">Use file</button>
       </div>
-      <div class="hint">Generic tasks can run without a resume.</div>
+      <div class="hint" id="resumeHint">Generic tasks can run without a resume.</div>
     </div>
 
     <div class="group">
@@ -284,6 +287,8 @@ const $ = (id) => document.getElementById(id);
 const GENERIC_PROMPT = '请打开目标网页，根据我的目标完成操作。遇到登录、验证码、扫码、真实身份验证或其他必须人工处理的步骤时，请暂停并输出 AGENT_STATUS=BLOCKED。';
 const ALIBABA_PROMPT = '这是我的个人简历文件，然后现在我想去阿里官方招聘网站进行投递，然后请帮我找到适合我的岗位，然后帮我进行投递，填写表单，充分利用网站信息';
 const ALIBABA_URL = 'https://talent-holding.alibaba.com/off-campus/position-list?lang=zh';
+const VENUE_PROMPT = '请为杭州团队筹备 2026 年 7 月 21 日 13:00–17:00 的 20 人半天工作坊。总预算不超过 4200 元，场地评分至少 4.7，地铁步行不超过 10 分钟，必须有 4K 大屏、可书写白板、20 人茶歇（可加购），并支持活动开始 24 小时前免费取消。请至少比较 3 个场地，选择满足全部条件的最佳方案，然后填写预订信息：联系人林舟，企业杭州栖木科技有限公司，手机号 13800001126，邮箱 linzhou@example.test，发票选择企业增值税普通发票，留言“请将桌椅预设为 4 组岛形布局”，并勾选已核对方案。不要点击任何会创建订单或发起支付的按钮；到达最终支付按钮后停下，汇报最终选择、其他候选项的淘汰原因、总价明细和最终按钮文字，然后输出 AGENT_STATUS=COMPLETED。';
+const venueUrl = () => `${window.location.origin}/fixtures/venue-booking`;
 let preset = 'generic';
 let runtime = 'claude-code';
 let activeRuntime = null;
@@ -345,10 +350,19 @@ function setPreset(next) {
   document.querySelectorAll('#presetSeg button').forEach((b) => b.classList.toggle('on', b.dataset.v === preset));
   if (preset === 'alibaba') {
     if (!$('url').value.trim()) $('url').value = ALIBABA_URL;
-    if (!$('prompt').value.trim() || $('prompt').value === GENERIC_PROMPT) $('prompt').value = ALIBABA_PROMPT;
-  } else if (!$('prompt').value.trim() || $('prompt').value === ALIBABA_PROMPT) {
+    if (!$('prompt').value.trim() || $('prompt').value === GENERIC_PROMPT || $('prompt').value === VENUE_PROMPT) $('prompt').value = ALIBABA_PROMPT;
+  } else if (preset === 'venue') {
+    $('url').value = venueUrl();
+    $('prompt').value = VENUE_PROMPT;
+  } else if (!$('prompt').value.trim() || $('prompt').value === ALIBABA_PROMPT || $('prompt').value === VENUE_PROMPT) {
     $('prompt').value = GENERIC_PROMPT;
   }
+  const venueMode = preset === 'venue';
+  $('resumeGroup').classList.toggle('is-disabled', venueMode);
+  $('resumePath').disabled = venueMode;
+  $('resumeFile').disabled = venueMode;
+  $('uploadBtn').disabled = venueMode;
+  $('resumeHint').textContent = venueMode ? '场地预订测试不读取或上传简历。' : 'Generic tasks can run without a resume.';
   updateRunMeta();
 }
 
@@ -686,6 +700,7 @@ $('runBtn').addEventListener('click', async () => {
     const isClaude = runtime === 'claude-code';
     const prompt = $('prompt').value.trim();
     const url = $('url').value.trim();
+    const resumePath = preset === 'venue' ? undefined : ($('resumePath').value.trim() || undefined);
     const started = await api(activeRuntimeInfo().runPath, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -697,7 +712,7 @@ $('runBtn').addEventListener('click', async () => {
         startUrl: url,
         prompt,
         taskPrompt: prompt,
-        resumePath: $('resumePath').value.trim() || undefined,
+        resumePath,
         headless: $('headless').checked,
         maxTurns: $('maxTurns').value.trim() || undefined,
         allowedDomains: $('allowedDomains').value.trim() || undefined,
@@ -705,7 +720,7 @@ $('runBtn').addEventListener('click', async () => {
         runtime,
         mode,
         startUrl: url,
-        resumePath: $('resumePath').value.trim() || undefined,
+        resumePath,
         headless: $('headless').checked,
         prompt,
         taskPrompt: prompt,

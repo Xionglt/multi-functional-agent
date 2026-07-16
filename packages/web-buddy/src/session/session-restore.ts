@@ -8,6 +8,7 @@ import type {
 import type { WorkflowEvidence } from '../workflow/workflow-evidence.js'
 import type { WorkflowState } from '../workflow/workflow-state.js'
 import type { AgentSession, FinalResultEntry, SessionStore, TranscriptEntry } from './session-types.js'
+import type { TaskNotificationPromptAttachmentV1 } from '../agents/async-task-contracts.js'
 import { readJsonLines } from './transcript.js'
 import { migrateTranscriptEntriesWithWarnings, type MigrationWarning } from './migrations.js'
 
@@ -25,6 +26,7 @@ export interface RestoredSessionState {
   migrationWarnings: MigrationWarning[]
   missingCriteria: WorkflowCriterionMissing[]
   blockers: WorkflowBlocker[]
+  asyncTaskPromptAttachments: TaskNotificationPromptAttachmentV1[]
 }
 
 export type RestoreSessionStateInput =
@@ -49,6 +51,7 @@ export async function restoreSessionState(input: RestoreSessionStateInput): Prom
   let latestCompletionGate: CompletionGateDecision | undefined
   let latestFinalResult: FinalResultEntry | undefined
   const workflowEvidence: WorkflowEvidence[] = []
+  const asyncTaskPromptAttachments: TaskNotificationPromptAttachmentV1[] = []
   let restoredMessages: ChatMessage[] = []
 
   for (const entry of transcript) {
@@ -57,6 +60,11 @@ export async function restoreSessionState(input: RestoreSessionStateInput): Prom
 
     if (entry.type === 'context_compaction') {
       restoredMessages = compactedRestoreMessages(entry)
+      continue
+    }
+
+    if (entry.type === 'async_task_notification_attachment') {
+      asyncTaskPromptAttachments.push(structuredClone(entry.attachment))
       continue
     }
 
@@ -105,10 +113,14 @@ export async function restoreSessionState(input: RestoreSessionStateInput): Prom
       arrayProperty<WorkflowBlocker>(latestWorkflowEvaluation, 'blockers') ??
       arrayProperty<WorkflowBlocker>(latestCompletionGate, 'blockers') ??
       [],
+    asyncTaskPromptAttachments,
   }
 }
 
 function chatMessageFromTranscriptEntry(entry: TranscriptEntry): ChatMessage | undefined {
+  if (entry.type === 'async_task_notification_attachment') {
+    return { role: 'user', content: entry.content }
+  }
   if (entry.type === 'user_message') {
     return { role: 'user', content: entry.content }
   }

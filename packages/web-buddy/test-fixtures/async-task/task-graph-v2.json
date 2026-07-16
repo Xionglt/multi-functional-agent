@@ -1,0 +1,82 @@
+{
+  "schemaVersion": "agent-task-graph/v2",
+  "revision": 0,
+  "nextEventSeq": 1,
+  "graphId": "graph_fixture_001",
+  "runId": "run_fixture_001",
+  "sessionId": "session_fixture_001",
+  "createdAt": "2026-07-10T00:00:00.000Z",
+  "updatedAt": "2026-07-10T00:00:00.000Z",
+  "owner": "runtime_orchestrator",
+  "actionClock": {
+    "schemaVersion": "browser-action-clock/v1",
+    "sessionId": "session_fixture_001",
+    "runId": "run_fixture_001",
+    "currentActionSeq": 8,
+    "updatedAt": "2026-07-10T00:00:00.000Z",
+    "authority": "main_agent_runtime"
+  },
+  "tasks": [{
+    "schemaVersion": "agent-task/v2",
+    "id": "task_trace_001",
+    "kind": "trace_summarization",
+    "accessMode": "read_only",
+    "capacityClass": "read_only_llm",
+    "status": "pending",
+    "title": "Summarize frozen trace",
+    "priority": 10,
+    "requiredForCompletion": true,
+    "terminalPolicy": "must_complete_successfully",
+    "blockedBy": [],
+    "blocks": [],
+    "inputs": [{
+      "kind": "trace_artifact",
+      "artifactRef": {
+        "schemaVersion": "immutable-artifact-ref/v1",
+        "artifactId": "artifact_trace_001",
+        "artifactKind": "trace",
+        "runId": "run_fixture_001",
+        "sessionId": "session_fixture_001",
+        "storage": { "store": "session_artifacts", "relativeSegments": ["traces", "trace-001.jsonl"] },
+        "mediaType": "application/x-ndjson",
+        "byteLength": 2048,
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "createdAt": "2026-07-10T00:00:00.000Z",
+        "actionBinding": { "kind": "browser_action", "sourceActionSeq": 7 },
+        "immutable": true
+      }
+    }],
+    "outputs": [],
+    "attempts": [],
+    "actionBinding": { "kind": "browser_action", "sourceActionSeq": 7 },
+    "idempotency": {
+      "schemaVersion": "agent-task-idempotency/v1",
+      "scope": "session",
+      "key": "trace-001:summarize:v1",
+      "canonicalization": "web-buddy-task-input-jcs/v1",
+      "digestAlgorithm": "sha256",
+      "inputDigest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    "attempt": 0,
+    "maxAttempts": 2,
+    "timeoutMs": 120000,
+    "leaseDurationMs": 150000,
+    "createdAt": "2026-07-10T00:00:00.000Z",
+    "updatedAt": "2026-07-10T00:00:00.000Z",
+    "requiresMainWorkflowVerification": true,
+    "authoritativeCompletionEvidence": false
+  }],
+  "locks": [],
+  "notificationOutbox": [],
+  "safety": {
+    "browserWriteOwnership": { "owner": "main_agent_runtime" },
+    "subagentCapabilityPolicy": "immutable_artifact_read_only",
+    "subagentDefaultAccessMode": "read_only",
+    "allowedReadOnlyTaskKinds": ["candidate_job_research", "trace_summarization", "memory_retrieval"],
+    "allowedReadOnlyTools": ["artifact_read_text", "artifact_read_json", "artifact_search_text", "artifact_list_refs"],
+    "disallowedSubagentGateKinds": ["login", "captcha", "upload_resume", "save_resume", "final_submit"],
+    "disallowedSubagentToolNames": ["browser_open", "browser_click", "browser_click_text", "browser_type", "browser_fill_by_label", "browser_select", "browser_select_by_text", "browser_set_field", "browser_press_key", "browser_upload_file", "agent_done", "ask_user"],
+    "finalDecisionOwner": "main_agent_runtime",
+    "completionEvidenceRequiresMainVerification": true
+  }
+}

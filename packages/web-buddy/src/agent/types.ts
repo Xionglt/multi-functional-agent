@@ -78,6 +78,7 @@ export interface PromptAssemblerInput {
   fieldPlan?: FieldPlan
   fillLedgerSummary?: FillLedgerSummary
   answerSummary?: string
+  agentTasks?: string
   safetyMode?: AgentSafetyMode
   taskType?: WebBuddyTaskType
 }

@@ -13,8 +13,11 @@ type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, Ex
 
 export interface SessionRecorder {
   readonly session: AgentSession
+  readonly durability: 'durable' | 'none'
   event(event: EventInput): Promise<void>
   transcript(entry: TranscriptInput): Promise<void>
+  /** Bypasses best-effort swallowing for effects that must be durable before acknowledgement. */
+  transcriptDurably(entry: TranscriptInput): Promise<void>
   workflow(workflowState: unknown): Promise<void>
   updateStatus(status: AgentSessionStatus, patch?: Partial<AgentSession>): Promise<void>
 }
@@ -25,6 +28,7 @@ export interface FileSessionRecorderOptions {
 }
 
 export class FileSessionRecorder implements SessionRecorder {
+  readonly durability = 'durable' as const
   session: AgentSession
   private readonly bestEffort: boolean
   private readonly warn?: (message: string) => void
@@ -53,15 +57,12 @@ export class FileSessionRecorder implements SessionRecorder {
 
   async transcript(entry: TranscriptInput): Promise<void> {
     await this.run('transcript', async () => {
-      await this.store.appendTranscript({
-        version: 1,
-        sessionId: this.session.sessionId,
-        runId: this.session.runId,
-        entryId: createTranscriptEntryId(entry.type),
-        ts: new Date().toISOString(),
-        ...entry,
-      } as TranscriptEntry)
+      await this.appendTranscript(entry)
     })
+  }
+
+  async transcriptDurably(entry: TranscriptInput): Promise<void> {
+    await this.appendTranscript(entry)
   }
 
   async workflow(workflowState: unknown): Promise<void> {
@@ -90,9 +91,21 @@ export class FileSessionRecorder implements SessionRecorder {
       this.warn?.(`Session recorder ${label} write failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
+
+  private async appendTranscript(entry: TranscriptInput): Promise<void> {
+    await this.store.appendTranscript({
+      version: 1,
+      sessionId: this.session.sessionId,
+      runId: this.session.runId,
+      entryId: createTranscriptEntryId(entry.type),
+      ts: new Date().toISOString(),
+      ...entry,
+    } as TranscriptEntry)
+  }
 }
 
 export class NoopSessionRecorder implements SessionRecorder {
+  readonly durability = 'none' as const
   readonly session: AgentSession = {
     version: 1,
     sessionId: 'noop',
@@ -110,6 +123,7 @@ export class NoopSessionRecorder implements SessionRecorder {
 
   async event(): Promise<void> {}
   async transcript(): Promise<void> {}
+  async transcriptDurably(): Promise<void> {}
   async workflow(): Promise<void> {}
   async updateStatus(): Promise<void> {}
 }

@@ -7,6 +7,11 @@ import {
   type LocalToolDef,
   type LocalToolRunResult,
 } from '../../tools/local-adapter.js'
+import {
+  resolveToolExecutionPolicy,
+  type ResolvedToolExecutionPolicyV1,
+  type ToolExecutionPolicyDiagnosticV1,
+} from '../../tools/tool-execution-policy.js'
 
 export type ToolContext = LocalToolContext
 export type ToolRunResult = LocalToolRunResult
@@ -45,6 +50,24 @@ export class ToolRegistry {
     const tool = this.tools.get(name)
     if (!tool) return undefined
     return tool.resolveRisk?.(args, ctx) ?? tool.inherentRisk
+  }
+
+  /** Pure S001 classification; it is not a scheduling decision by itself. */
+  resolveExecutionPolicy(
+    name: string,
+    args: Record<string, unknown>,
+    ctx: ToolContext,
+    onDiagnostic?: (diagnostic: ToolExecutionPolicyDiagnosticV1) => void,
+  ): ResolvedToolExecutionPolicyV1 {
+    const tool = this.tools.get(name)
+    return resolveToolExecutionPolicy({
+      toolName: name,
+      arguments: args,
+      sessionId: ctx.sessionId,
+      catalogPolicy: tool?.execution,
+      resolver: tool?.resolveExecution,
+      onDiagnostic,
+    })
   }
 
   async run(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<ToolRunResult> {

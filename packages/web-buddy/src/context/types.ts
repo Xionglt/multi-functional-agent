@@ -50,6 +50,8 @@ export interface ContextSnapshot {
   fieldPlan?: FieldPlan
   fillLedgerSummary?: FillLedgerSummary
   answerSummary?: string
+  /** Bounded control-plane summary of background work; never includes child ReAct history. */
+  agentTasks?: string
   freshness: ContextFreshness
   resumeSummary: string
   recentActions: ContextRecentAction[]
@@ -76,6 +78,7 @@ export interface ContextSnapshotInput {
   fieldPlan?: FieldPlan
   fillLedgerSummary?: FillLedgerSummary
   answerSummary?: string
+  agentTasks?: string
   updatedAt?: string
 }
 
@@ -85,6 +88,7 @@ export type PromptSectionId =
   | 'TASK'
   | 'TASK_STATE'
   | 'WORKFLOW_STATE'
+  | 'AGENT_TASKS'
   | 'RUN_MEMORY'
   | 'RELEVANT_MEMORIES'
   | 'RESUME_SUMMARY'

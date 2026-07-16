@@ -17,6 +17,11 @@ const SUBMIT_PATTERNS = [
   /支付/,
 ]
 
+const LOW_RISK_FORM_ACTION =
+  /search|find|filter|apply\s+filters?|compare|sort|lookup|搜索|查询|查找|检索|筛选|过滤|比较|排序/i
+const IRREVERSIBLE_ACTION =
+  /submit\s+(?:application|order)|apply\s+now|application|place\s+order|checkout|purchase|buy|pay|publish|send|delete|remove|save\s+(?:profile|application)|提交申请|投递|申请|报名|订单|下单|购买|支付|付款|发布|发送|删除|保存资料/i
+
 export function detectElementRisk(input: {
   tag: string
   role?: string
@@ -25,6 +30,9 @@ export function detectElementRisk(input: {
   typeAttr?: string | null
 }): ElementRef['risk'] {
   const label = [input.name, input.text].filter(Boolean).join(' ')
+  const isKnownLowRiskFormAction = LOW_RISK_FORM_ACTION.test(label) && !IRREVERSIBLE_ACTION.test(label)
+  if (isKnownLowRiskFormAction) return 'L1'
+
   const isSubmitButton =
     input.tag === 'button' &&
     (input.typeAttr === 'submit' || SUBMIT_PATTERNS.some((p) => p.test(label)))

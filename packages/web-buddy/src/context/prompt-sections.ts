@@ -14,6 +14,7 @@ export const PROMPT_SECTION_ORDER: PromptSectionId[] = [
   'TASK',
   'TASK_STATE',
   'WORKFLOW_STATE',
+  'AGENT_TASKS',
   'RUN_MEMORY',
   'RELEVANT_MEMORIES',
   'RESUME_SUMMARY',
@@ -40,6 +41,7 @@ const DEFAULT_SECTION_MAX_CHARS: Record<PromptSectionId, number> = {
   TASK: 1400,
   TASK_STATE: 900,
   WORKFLOW_STATE: 900,
+  AGENT_TASKS: 1600,
   RUN_MEMORY: 1400,
   RELEVANT_MEMORIES: 900,
   RESUME_SUMMARY: 2200,
@@ -56,6 +58,7 @@ const SECTION_TITLES: Record<PromptSectionId, string> = {
   TASK: 'TASK',
   TASK_STATE: 'TASK_STATE',
   WORKFLOW_STATE: 'WORKFLOW_STATE',
+  AGENT_TASKS: 'AGENT_TASKS',
   RUN_MEMORY: 'RUN_MEMORY',
   RELEVANT_MEMORIES: 'RELEVANT_MEMORIES',
   RESUME_SUMMARY: 'RESUME_SUMMARY',
@@ -119,6 +122,8 @@ function renderSectionContent(id: PromptSectionId, snapshot: ContextSnapshot): s
       }))
     case 'WORKFLOW_STATE':
       return renderWorkflowState(snapshot.workflowState)
+    case 'AGENT_TASKS':
+      return snapshot.agentTasks || '(no background tasks in this session)'
     case 'RUN_MEMORY':
       return renderRunMemory(snapshot.runMemory)
     case 'RELEVANT_MEMORIES':

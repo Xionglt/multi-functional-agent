@@ -4,6 +4,8 @@ export type KernelEventType =
   | 'turn_started'
   | 'turn_completed'
   | 'model_message'
+  /** Non-canonical shadow-only scheduling projection; never a tool lifecycle event. */
+  | 'tool_orchestration_plan'
   | 'tool_call_created'
   | 'tool_started'
   | 'tool_completed'
@@ -16,6 +18,8 @@ export type KernelEventType =
   | 'skill_resolved'
   | 'token_budget_updated'
   | 'context_compacted'
+  | 'agent_task_notifications_injected'
+  | 'agent_task_action_clock_advanced'
   | 'workflow_updated'
   | 'memory_updated'
   | 'memory_retrieved'

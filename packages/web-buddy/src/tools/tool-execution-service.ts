@@ -158,7 +158,18 @@ export class ToolExecutionService {
     }
 
     try {
-      return await Promise.race(races)
+      const winner = await Promise.race(races)
+      // A tool implementation may still own a live browser operation after its
+      // abort/timeout signal wins the race. Do not let the caller finalize the
+      // session while that work is detached: wait for the execution boundary to
+      // settle, then retain the requested aborted/timed-out terminal result.
+      // This is deliberately conservative for all tools; policy-specific
+      // parallelism is introduced only by the later orchestrator wave.
+      if (
+        (winner.kind === 'aborted' || winner.kind === 'timeout') &&
+        context.metadata?.interruptBehavior === 'block'
+      ) await registryPromise
+      return winner
     } finally {
       if (timeoutId) clearTimeout(timeoutId)
       if (abortListener) context.abortSignal?.removeEventListener('abort', abortListener)

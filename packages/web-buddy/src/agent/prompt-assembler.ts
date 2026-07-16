@@ -56,6 +56,7 @@ export class PromptAssembler {
       fieldPlan: input.fieldPlan,
       fillLedgerSummary: input.fillLedgerSummary,
       answerSummary: input.answerSummary,
+      agentTasks: input.agentTasks,
       updatedAt,
     })
     const resolvedSkillContext = resolveSkills(loadSkills(), {

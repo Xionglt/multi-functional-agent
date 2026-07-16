@@ -5,6 +5,7 @@ import type {
 } from '../permission/permission-types.js'
 import type { FormFieldState } from '../observation/form-state.js'
 import type { ChatMessage } from '../sdk/llm.js'
+import type { AgentTaskCompactFactV1 } from '../agents/async-task-contracts.js'
 import type { EvidenceStoreSnapshot, WorkflowEvidence } from '../workflow/workflow-evidence.js'
 import type { WorkflowState } from '../workflow/workflow-state.js'
 import { oneLine, truncateText } from './budget.js'
@@ -81,6 +82,7 @@ export interface ContextCompactionInput {
   trigger?: CompactTrigger
   compactMode?: CompactMode
   semanticSummary?: SemanticCompactSummary
+  agentTaskFacts?: AgentTaskCompactFactV1[]
   summaryId?: string
   createdAt?: string
 }
@@ -186,6 +188,7 @@ export class ContextCompactor {
       ...(completion ? { completion } : {}),
       permissionContract: summarizePermissionContract(permissions, approvals),
       ...(answerMemory ? { answerMemory } : {}),
+      ...(input.agentTaskFacts?.length ? { agentTasks: structuredClone(input.agentTaskFacts) } : {}),
       ...(failurePatterns.length ? { failurePatterns } : {}),
       ...(staleRefs ? { staleRefs } : {}),
       ...(input.semanticSummary ? { semanticSummary: input.semanticSummary } : {}),

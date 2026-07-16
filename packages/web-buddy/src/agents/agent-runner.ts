@@ -1,4 +1,13 @@
+import { createHash } from 'node:crypto'
+import { readFile, realpath } from 'node:fs/promises'
+import { resolve, sep } from 'node:path'
 import type { SessionRecorder } from '../session/session-recorder.js'
+import type { ToolSchema } from '../sdk/llm.js'
+import type {
+  ImmutableArtifactRef,
+  JsonValue,
+  ReadOnlyArtifactToolName,
+} from './async-task-contracts.js'
 import {
   assertReadOnlySubagentTask,
   type AddAgentTaskOutputInput,
@@ -29,6 +38,144 @@ export const DISALLOWED_SUBAGENT_WRITE_TOOL_NAMES = [
   'agent_done',
   'ask_user',
 ] as const
+
+export const CONTRACT_READ_ONLY_ARTIFACT_TOOL_NAMES = [
+  'artifact_read_text',
+  'artifact_read_json',
+  'artifact_search_text',
+  'artifact_list_refs',
+] as const satisfies readonly ReadOnlyArtifactToolName[]
+
+export interface ImmutableArtifactReader {
+  read(ref: ImmutableArtifactRef): Promise<Uint8Array>
+}
+
+export interface ContractReadOnlyArtifactToolResult {
+  toolCallId: string
+  name: ReadOnlyArtifactToolName
+  ok: true
+  result: JsonValue
+}
+
+export class ContractReadOnlyArtifactToolError extends Error {
+  constructor(
+    readonly code: 'TOOL_DENIED' | 'ARTIFACT_NOT_READY' | 'ARTIFACT_INTEGRITY_FAILED',
+    message: string,
+  ) {
+    super(message)
+    this.name = 'ContractReadOnlyArtifactToolError'
+  }
+}
+
+export class FileImmutableArtifactReader implements ImmutableArtifactReader {
+  private readonly rootDir: string
+
+  constructor(rootDir: string) {
+    this.rootDir = resolve(rootDir)
+  }
+
+  async read(ref: ImmutableArtifactRef): Promise<Uint8Array> {
+    assertImmutableArtifactRef(ref)
+    const root = await realpath(this.rootDir).catch(() => {
+      throw new ContractReadOnlyArtifactToolError('ARTIFACT_NOT_READY', 'Session artifact root is not available.')
+    })
+    const candidate = resolve(root, ...ref.storage.relativeSegments)
+    assertPathInsideRoot(root, candidate)
+    const resolvedPath = await realpath(candidate).catch(() => {
+      throw new ContractReadOnlyArtifactToolError('ARTIFACT_NOT_READY', `Artifact ${ref.artifactId} is not available.`)
+    })
+    assertPathInsideRoot(root, resolvedPath)
+    const bytes = await readFile(resolvedPath)
+    const digest = createHash('sha256').update(bytes).digest('hex')
+    if (bytes.byteLength !== ref.byteLength || digest !== ref.sha256) {
+      throw new ContractReadOnlyArtifactToolError(
+        'ARTIFACT_INTEGRITY_FAILED',
+        `Artifact integrity verification failed for ${ref.artifactId}.`,
+      )
+    }
+    return bytes
+  }
+}
+
+export function readOnlySubagentToolSchemas(
+  allowedTools: readonly ReadOnlyArtifactToolName[] = CONTRACT_READ_ONLY_ARTIFACT_TOOL_NAMES,
+): ToolSchema[] {
+  const allowed = new Set(allowedTools)
+  return CONTRACT_READ_ONLY_ARTIFACT_TOOL_NAMES
+    .filter((name) => allowed.has(name))
+    .map((name) => toolSchemaFor(name))
+}
+
+export async function executeContractReadOnlyArtifactTool(input: {
+  call: ReadOnlySubagentToolCall
+  allowedTools: readonly ReadOnlyArtifactToolName[]
+  artifacts: readonly ImmutableArtifactRef[]
+  reader: ImmutableArtifactReader
+}): Promise<ContractReadOnlyArtifactToolResult> {
+  if (!isContractReadOnlyArtifactToolName(input.call.name) || !input.allowedTools.includes(input.call.name)) {
+    throw new ContractReadOnlyArtifactToolError(
+      'TOOL_DENIED',
+      readOnlyToolDeniedMessage(input.call.name),
+    )
+  }
+
+  const name = input.call.name
+  const toolCallId = input.call.id ?? name
+  if (name === 'artifact_list_refs') {
+    return {
+      toolCallId,
+      name,
+      ok: true,
+      result: {
+        artifacts: input.artifacts.map((ref) => ({
+          artifactId: ref.artifactId,
+          artifactKind: ref.artifactKind,
+          mediaType: ref.mediaType,
+          byteLength: ref.byteLength,
+          actionBinding: ref.actionBinding,
+        })),
+      },
+    }
+  }
+
+  const artifactId = requiredStringArgument(input.call, 'artifactId')
+  const ref = input.artifacts.find((candidate) => candidate.artifactId === artifactId)
+  if (!ref) {
+    throw new ContractReadOnlyArtifactToolError(
+      'TOOL_DENIED',
+      `Artifact ${artifactId} is not selected in this task context envelope.`,
+    )
+  }
+  const bytes = await input.reader.read(ref)
+  const text = Buffer.from(bytes).toString('utf8')
+
+  if (name === 'artifact_read_text') {
+    return { toolCallId, name, ok: true, result: { artifactId, text } }
+  }
+  if (name === 'artifact_read_json') {
+    try {
+      return { toolCallId, name, ok: true, result: { artifactId, value: JSON.parse(text) as JsonValue } }
+    } catch {
+      throw new ContractReadOnlyArtifactToolError(
+        'ARTIFACT_INTEGRITY_FAILED',
+        `Artifact ${artifactId} is not valid JSON.`,
+      )
+    }
+  }
+
+  const query = requiredStringArgument(input.call, 'query')
+  const requestedMax = input.call.arguments?.maxMatches
+  const maxMatches = typeof requestedMax === 'number' && Number.isInteger(requestedMax)
+    ? Math.max(1, Math.min(requestedMax, 50))
+    : 20
+  const normalizedQuery = query.toLocaleLowerCase()
+  const matches = text
+    .split(/\r?\n/)
+    .map((line, index) => ({ lineNumber: index + 1, text: line }))
+    .filter((entry) => entry.text.toLocaleLowerCase().includes(normalizedQuery))
+    .slice(0, maxMatches)
+  return { toolCallId, name, ok: true, result: { artifactId, query, matches } }
+}
 
 export interface ReadOnlyArtifact {
   kind: ReadOnlyArtifactKind
@@ -430,4 +577,89 @@ function cloneValue(value: unknown): unknown {
     clone[key] = cloneValue(nested)
   }
   return clone
+}
+
+function isContractReadOnlyArtifactToolName(name: string): name is ReadOnlyArtifactToolName {
+  return CONTRACT_READ_ONLY_ARTIFACT_TOOL_NAMES.includes(name as ReadOnlyArtifactToolName)
+}
+
+function requiredStringArgument(call: ReadOnlySubagentToolCall, name: string): string {
+  const value = call.arguments?.[name]
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new ContractReadOnlyArtifactToolError('TOOL_DENIED', `${call.name} requires a non-empty ${name}.`)
+  }
+  return value
+}
+
+function assertImmutableArtifactRef(ref: ImmutableArtifactRef): void {
+  if (ref.schemaVersion !== 'immutable-artifact-ref/v1' || ref.immutable !== true) {
+    throw new ContractReadOnlyArtifactToolError('ARTIFACT_INTEGRITY_FAILED', 'Artifact ref is not immutable.')
+  }
+  if (ref.storage.store !== 'session_artifacts' || ref.storage.relativeSegments.length === 0) {
+    throw new ContractReadOnlyArtifactToolError('ARTIFACT_INTEGRITY_FAILED', 'Artifact ref has invalid storage metadata.')
+  }
+  if (ref.storage.relativeSegments.some((segment) => (
+    !segment
+    || segment === '.'
+    || segment === '..'
+    || segment.includes('/')
+    || segment.includes('\\')
+  ))) {
+    throw new ContractReadOnlyArtifactToolError('ARTIFACT_INTEGRITY_FAILED', 'Artifact ref contains unsafe path segments.')
+  }
+  if (!Number.isSafeInteger(ref.byteLength) || ref.byteLength < 0 || !/^[a-f0-9]{64}$/i.test(ref.sha256)) {
+    throw new ContractReadOnlyArtifactToolError('ARTIFACT_INTEGRITY_FAILED', 'Artifact ref has invalid integrity metadata.')
+  }
+}
+
+function assertPathInsideRoot(root: string, candidate: string): void {
+  if (candidate === root || candidate.startsWith(`${root}${sep}`)) return
+  throw new ContractReadOnlyArtifactToolError('ARTIFACT_INTEGRITY_FAILED', 'Artifact path escapes the session artifact root.')
+}
+
+function toolSchemaFor(name: ReadOnlyArtifactToolName): ToolSchema {
+  if (name === 'artifact_list_refs') {
+    return {
+      type: 'function',
+      function: {
+        name,
+        description: 'List immutable artifacts selected in this task context envelope.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+      },
+    }
+  }
+  if (name === 'artifact_search_text') {
+    return {
+      type: 'function',
+      function: {
+        name,
+        description: 'Search text inside one selected immutable artifact without accessing a live page.',
+        parameters: {
+          type: 'object',
+          properties: {
+            artifactId: { type: 'string' },
+            query: { type: 'string' },
+            maxMatches: { type: 'integer', minimum: 1, maximum: 50 },
+          },
+          required: ['artifactId', 'query'],
+          additionalProperties: false,
+        },
+      },
+    }
+  }
+  return {
+    type: 'function',
+    function: {
+      name,
+      description: name === 'artifact_read_json'
+        ? 'Read one selected immutable JSON artifact.'
+        : 'Read one selected immutable text artifact.',
+      parameters: {
+        type: 'object',
+        properties: { artifactId: { type: 'string' } },
+        required: ['artifactId'],
+        additionalProperties: false,
+      },
+    },
+  }
 }

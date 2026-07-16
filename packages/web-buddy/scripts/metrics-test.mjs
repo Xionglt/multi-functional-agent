@@ -56,10 +56,12 @@ try {
       span({ spanType: 'tool_call', name: 'browser_snapshot', toolName: 'browser_snapshot' }),
       span({ spanType: 'mcp_tool_call', name: 'browser_click', toolName: 'browser_click' }),
       span({ spanType: 'mcp_tool_call', name: 'browser_wait', toolName: 'browser_wait' }),
+      span({ spanType: 'mcp_tool_call', name: 'mcp__playwright__browser_click', toolName: 'mcp__playwright__browser_click', parentSpanId: 'span_claude_pass' }),
       span({ spanType: 'screenshot', name: 'page_screenshot' }),
     ].join('\n') + '\n')
     writeFileSync(eventsJsonl, [
       JSON.stringify({ event: 'WEB_HANDOFF_WAITING', data: {} }),
+      JSON.stringify({ event: 'session_end', data: { blockedHandoffs: 0, handoffMode: 'file' } }),
       JSON.stringify({
         event: 'skill_resolution',
         data: {

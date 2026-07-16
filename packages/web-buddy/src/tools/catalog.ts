@@ -1,8 +1,9 @@
 import type { ToolCategory, ToolDef } from './types.js'
+import type { ToolExecutionPolicyV1 } from './tool-execution-policy.js'
 
 const sessionProperty = { type: 'string', description: 'Optional browser session id. Defaults to "default".' }
 
-export const TOOL_CATALOG: ToolDef[] = [
+const RAW_TOOL_CATALOG: Omit<ToolDef, 'execution'>[] = [
   {
     name: 'browser_open',
     mcpName: 'browser_open',
@@ -494,6 +495,132 @@ export const TOOL_CATALOG: ToolDef[] = [
     metadata: { produces: ['screenshot'] },
   },
   {
+    name: 'trace_summarization',
+    description: 'Start the Wave 6 read-only trace summarization pilot from one immutable trace artifact. Returns a task reference immediately.',
+    category: 'eval',
+    risk: 'L0',
+    parameters: {
+      type: 'object',
+      properties: {
+        traceArtifactRef: { type: 'object', description: 'Same-session immutable trace artifact reference.' },
+        title: { type: 'string', description: 'Optional short task title.' },
+      },
+      required: ['traceArtifactRef'],
+    },
+    // Wave 6 pilot only. Keeping this out of the local registry prevents the
+    // foreground Loop from routing it before the background gate is accepted.
+    local: { enabled: false },
+    mcp: { enabled: false },
+    metadata: { readOnly: true, backgroundPilot: true },
+  },
+  {
+    name: 'agent_task_spawn',
+    description:
+      'Start a read-only or analysis-only background task and return immediately. Use this for independent research, trace summarization, memory retrieval, workflow evaluation, or delivery probes while the main agent keeps control of the browser.',
+    category: 'eval',
+    risk: 'L0',
+    parameters: {
+      type: 'object',
+      properties: {
+        kind: {
+          type: 'string',
+          enum: ['candidate_job_research', 'trace_summarization', 'memory_retrieval', 'workflow_evaluation', 'delivery_probe'],
+        },
+        title: { type: 'string', description: 'Short task title.' },
+        goal: { type: 'string', description: 'Concrete, self-contained goal for the background worker.' },
+        artifactIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Immutable session artifact ids the worker may read.',
+        },
+        blockedBy: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional task ids that must complete first.',
+        },
+        requiredForCompletion: {
+          type: 'boolean',
+          description: 'When true, agent_done is blocked until this task satisfies its terminal policy.',
+        },
+        terminalPolicy: {
+          type: 'string',
+          enum: ['must_complete_successfully', 'terminal_is_sufficient', 'does_not_block'],
+        },
+        idempotencyKey: {
+          type: 'string',
+          description: 'Stable session-scoped key. Reusing it with identical input returns the existing task.',
+        },
+      },
+      required: ['kind', 'title', 'goal', 'idempotencyKey'],
+    },
+    local: { enabled: true },
+    mcp: { enabled: false },
+    metadata: { readOnly: true, asyncControlPlane: true },
+  },
+  {
+    name: 'agent_task_status',
+    description: 'Inspect one background task or list the current session task graph without blocking.',
+    category: 'observation',
+    risk: 'L0',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'Optional task id. Omit to list all tasks.' },
+      },
+    },
+    local: { enabled: true },
+    mcp: { enabled: false },
+    metadata: { readOnly: true, asyncControlPlane: true },
+  },
+  {
+    name: 'agent_task_wait',
+    description: 'Wait briefly for a task to become terminal or for any background notification to arrive.',
+    category: 'observation',
+    risk: 'L0',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'Optional task id. Omit to wait for any session task notification.' },
+        timeoutMs: { type: 'number', description: 'Maximum wait duration. Capped by the runtime.' },
+      },
+    },
+    local: { enabled: true },
+    mcp: { enabled: false },
+    metadata: { readOnly: true, asyncControlPlane: true },
+  },
+  {
+    name: 'agent_task_result',
+    description: 'Read the terminal metadata and immutable output references for a background task. Results are advisory until the main agent verifies them.',
+    category: 'observation',
+    risk: 'L0',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string' },
+      },
+      required: ['taskId'],
+    },
+    local: { enabled: true },
+    mcp: { enabled: false },
+    metadata: { readOnly: true, asyncControlPlane: true },
+  },
+  {
+    name: 'agent_task_cancel',
+    description: 'Cancel a pending or running background task. This never cancels or transfers browser ownership from the main agent.',
+    category: 'eval',
+    risk: 'L0',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string' },
+      },
+      required: ['taskId'],
+    },
+    local: { enabled: true },
+    mcp: { enabled: false },
+    metadata: { asyncControlPlane: true },
+  },
+  {
     name: 'agent_done',
     description:
       'Signal that the task is complete. Call this with a short summary when the requested task is finished or when you are blocked and cannot continue.',
@@ -513,12 +640,84 @@ export const TOOL_CATALOG: ToolDef[] = [
   },
 ]
 
+const POLICY = (
+  readOnly: boolean,
+  foreground: ToolExecutionPolicyV1['foreground'],
+  resource: ToolExecutionPolicyV1['resource'],
+  interruptBehavior: ToolExecutionPolicyV1['interruptBehavior'],
+): ToolExecutionPolicyV1 => ({
+  schemaVersion: 'tool-execution-policy/v1',
+  readOnly,
+  foreground,
+  resource,
+  interruptBehavior,
+  background: 'never',
+})
+
+const RESUME_QUERY_POLICY = POLICY(true, 'parallel', 'none', 'cancel')
+const BROWSER_POLICY = POLICY(false, 'exclusive', 'browser_session', 'block')
+const BROWSER_READ_POLICY = POLICY(true, 'exclusive', 'browser_session', 'block')
+const HUMAN_POLICY = POLICY(true, 'exclusive', 'human', 'block')
+const RUN_STATE_READ_POLICY = POLICY(true, 'exclusive', 'run_state', 'block')
+const RUN_STATE_POLICY = POLICY(false, 'exclusive', 'run_state', 'block')
+const TRACE_BACKGROUND_POLICY: ToolExecutionPolicyV1 = {
+  schemaVersion: 'tool-execution-policy/v1', readOnly: true, foreground: 'exclusive',
+  resource: 'none', interruptBehavior: 'cancel', background: 'eligible',
+}
+/**
+ * Every catalog entry receives an explicit S001 contract. The mapping lives
+ * beside the catalog so future tools cannot accidentally inherit scheduling
+ * authority from legacy metadata.
+ */
+const EXECUTION_BY_TOOL: Readonly<Record<string, ToolExecutionPolicyV1>> = {
+  resume_query: RESUME_QUERY_POLICY,
+  // Wave 6 may propose a narrower background mapping. Through Wave 5 this
+  // post-freeze tool remains fail-closed on the foreground run-state boundary.
+  trace_summarization: RUN_STATE_READ_POLICY,
+  browser_snapshot: BROWSER_READ_POLICY,
+  browser_form_snapshot: BROWSER_READ_POLICY,
+  browser_form_audit: BROWSER_READ_POLICY,
+  browser_inspect_options: BROWSER_READ_POLICY,
+  browser_wait: BROWSER_READ_POLICY,
+  browser_screenshot: BROWSER_READ_POLICY,
+  job_match_candidates: BROWSER_READ_POLICY,
+  browser_open: BROWSER_POLICY,
+  browser_click: BROWSER_POLICY,
+  browser_click_text: BROWSER_POLICY,
+  browser_upload_file: BROWSER_POLICY,
+  browser_fill_by_label: BROWSER_POLICY,
+  browser_select_by_text: BROWSER_POLICY,
+  browser_set_field: BROWSER_POLICY,
+  browser_type: BROWSER_POLICY,
+  browser_press_key: BROWSER_POLICY,
+  browser_select: BROWSER_POLICY,
+  ask_user: HUMAN_POLICY,
+  plan_form_fill: RUN_STATE_READ_POLICY,
+  agent_task_status: RUN_STATE_READ_POLICY,
+  agent_task_wait: RUN_STATE_READ_POLICY,
+  agent_task_result: RUN_STATE_READ_POLICY,
+  agent_task_spawn: RUN_STATE_POLICY,
+  agent_task_cancel: RUN_STATE_POLICY,
+  agent_done: RUN_STATE_POLICY,
+}
+
+export const TOOL_CATALOG: ToolDef[] = RAW_TOOL_CATALOG.map((tool) => {
+  const execution = EXECUTION_BY_TOOL[tool.name]
+  if (!execution) throw new Error(`Missing S001 execution policy for catalog tool: ${tool.name}`)
+  return { ...tool, execution }
+})
+
 export function listToolDefs(): ToolDef[] {
   return [...TOOL_CATALOG]
 }
 
-export function listLocalToolDefs(): ToolDef[] {
-  return TOOL_CATALOG.filter((tool) => tool.local.enabled)
+export function listLocalToolDefs(options: { traceSummarizationBackground?: boolean } = {}): ToolDef[] {
+  return TOOL_CATALOG.flatMap((tool) => {
+    if (tool.name === 'trace_summarization' && options.traceSummarizationBackground === true) {
+      return [{ ...tool, local: { enabled: true }, execution: TRACE_BACKGROUND_POLICY }]
+    }
+    return tool.local.enabled ? [tool] : []
+  })
 }
 
 export function listMcpToolDefs(): ToolDef[] {

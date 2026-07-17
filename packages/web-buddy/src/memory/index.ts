@@ -1,4 +1,11 @@
-export { ensureMemdir, memdirPaths, queryMemdir, readMemdirRecords, renderMemorySearchResult } from './memdir.js'
+export {
+  appendMemdirRecord,
+  ensureMemdir,
+  memdirPaths,
+  queryMemdir,
+  readMemdirRecords,
+  renderMemorySearchResult,
+} from './memdir.js'
 export type { MemdirPaths } from './memdir.js'
 export type {
   EpisodicRecallMemory,

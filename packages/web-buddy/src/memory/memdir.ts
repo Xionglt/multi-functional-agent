@@ -1,6 +1,10 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { MemoryKind, MemoryQuery, MemoryRecord, MemoryScope, MemorySearchResult } from './types.js'
+import {
+  evaluateMemoryWritePolicy,
+  type MemoryWriteSecurityContext,
+} from '../security/memory-write-policy.js'
 
 export interface MemdirPaths {
   root: string
@@ -66,6 +70,27 @@ export async function queryMemdir(root: string, query: MemoryQuery): Promise<Mem
       .sort((a, b) => b.score - a.score)
       .slice(0, query.maxResults),
   }
+}
+
+export async function appendMemdirRecord(
+  root: string,
+  record: MemoryRecord,
+  security: MemoryWriteSecurityContext,
+): Promise<void> {
+  const decision = evaluateMemoryWritePolicy(record, security)
+  if (decision.action !== 'allow') {
+    throw new Error(`MEMORY_WRITE_DENIED:${decision.reasonCode}: ${decision.reason}`)
+  }
+  if (!isMemoryRecord(record)) throw new Error('MEMORY_WRITE_DENIED:invalid_record')
+  const paths = await ensureMemdir(root)
+  const target = record.scope === 'user'
+    ? paths.user
+    : record.scope === 'project'
+      ? paths.project
+      : record.kind === 'site_fact' || record.kind === 'permission_rule'
+        ? paths.site
+        : paths.topic
+  await appendFile(target, `${JSON.stringify(record)}\n`, 'utf8')
 }
 
 export function renderMemorySearchResult(result: MemorySearchResult): string | undefined {
@@ -163,4 +188,3 @@ function isScope(value: unknown): value is MemoryScope {
 function isFileNotFound(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && (error as { code?: unknown }).code === 'ENOENT')
 }
-

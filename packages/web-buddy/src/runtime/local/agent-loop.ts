@@ -91,7 +91,22 @@ import { toLegacyToolRunResult, type NormalizedToolResult } from '../../tools/to
 import { createNormalizedToolError } from '../../tools/tool-errors.js'
 import type { BackgroundToolBridgeV1 } from '../../tools/background-tool-bridge.js'
 import type { ToolCall } from '../../tools/tool-contract.js'
-import type { ContextItem, EvidenceRef, TaskContract } from '../../task/contracts.js'
+import {
+  digestCanonicalJson,
+  type ApprovalBinding,
+  type ContextItem,
+  type EvidenceRef,
+  type TaskContract,
+  type TaskPolicy,
+} from '../../task/contracts.js'
+import {
+  createSinkActionBinding,
+  destinationOriginForTool,
+  evaluateSinkPolicy,
+  redactSensitiveData,
+  sensitiveActionKindForTool,
+  type SinkPolicyDecision,
+} from '../../security/index.js'
 import {
   orchestrateToolCalls,
   partitionToolCalls,
@@ -161,6 +176,7 @@ export interface AgentLoopInput {
   /** Explicit task contract for completion criteria. */
   taskType?: WebBuddyTaskType
   taskContract?: TaskContract
+  taskPolicy?: TaskPolicy
   llm: LlmGateway
   registry: ToolRegistry
   ctx: ToolContext
@@ -362,6 +378,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     allowFinalSubmit: input.allowFinalSubmit ?? false,
   })
   const approvalQueue = input.approvalQueue ?? new ApprovalQueue()
+  const consumedSinkApprovalNonces = new Set<string>()
   const workflowEngine = input.workflowEngine ?? defaultWorkflowEngine
   const completionGate = input.completionGate ?? defaultCompletionGate
   const workflowEvidenceStore = new EvidenceStore()
@@ -1673,14 +1690,16 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       const tool = registry.get(call.name)
       const toolCategory = tool?.category
       const risk = registry.resolveRisk(call.name, call.arguments, ctx)
-      const argBrief = briefArgs(call.name, call.arguments)
+      const callRedaction = redactSensitiveData(call.arguments)
+      const safeCallArgs = callRedaction.value as Record<string, unknown>
+      const argBrief = briefArgs(call.name, safeCallArgs)
       const currentUrl = sessionManager.get(ctx.sessionId)?.page.url()
       await sessionTranscript({
         type: 'tool_call',
         turnId,
         toolCallId: call.id,
         name: call.name,
-        args: call.arguments,
+        args: safeCallArgs,
       })
       await sessionEvent({
         type: 'tool_call_created',
@@ -1691,7 +1710,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       })
       const refLabel = call.name === 'browser_click' ? labelForClick(call.arguments, ctx) : undefined
       const contextText = actionIntentContextText(latestContext)
-      const policyDecision = decideToolPolicy({
+      let policyDecision = decideToolPolicy({
         toolName: call.name,
         args: call.arguments,
         risk,
@@ -1700,6 +1719,41 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         contextText,
         freshness: latestContext.freshness,
       })
+      const sinkActionKind = sensitiveActionKindForTool(call.name, policyDecision.gateKind)
+      const sinkSourceItems = contextItems.filter((item) => item.allowedUses.includes('sink'))
+      const sinkSourceOrigin = originForUrl(currentUrl)
+      const sinkDestinationOrigin = destinationOriginForTool(call.name, call.arguments, currentUrl)
+      const sinkActionBinding = sinkActionKind && input.taskPolicy && input.taskContract
+        ? createSinkActionBinding({
+            contractId: input.taskContract.contractId,
+            revision: input.taskContract.revision,
+            runId: session?.session.runId ?? ctx.trace.runId,
+            actionId: `${turnId}:${call.id}`,
+            toolName: call.name,
+            args: call.arguments,
+            sourceItems: sinkSourceItems,
+            ...(sinkSourceOrigin ? { sourceOrigin: sinkSourceOrigin } : {}),
+            ...(sinkDestinationOrigin ? { destinationOrigin: sinkDestinationOrigin } : {}),
+            actionSeq: step * 1000 + index,
+            expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+          })
+        : undefined
+      const sinkPreparation = sinkActionKind && input.taskPolicy
+        ? evaluateSinkPolicy({
+            actionKind: sinkActionKind,
+            runId: session?.session.runId ?? ctx.trace.runId,
+            revision: input.taskContract?.revision ?? 0,
+            policy: input.taskPolicy,
+            sourceItems: sinkSourceItems,
+            payload: call.arguments,
+            ...(sinkSourceOrigin ? { sourceOrigin: sinkSourceOrigin } : {}),
+            ...(sinkDestinationOrigin ? { destinationOrigin: sinkDestinationOrigin } : {}),
+            ...(sinkActionBinding ? { actionBinding: sinkActionBinding } : {}),
+          })
+        : undefined
+      if (sinkPreparation && sinkPreparation.action !== 'allow') {
+        policyDecision = sinkPolicyDecisionForPermission(policyDecision, sinkPreparation)
+      }
       const policyAudit = createPolicyAuditEvent({
         sessionId: ctx.sessionId,
         step,
@@ -1741,7 +1795,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         call: {
           id: call.id,
           name: call.name,
-          arguments: call.arguments,
+          arguments: safeCallArgs,
         },
         policyDecision,
         risk,
@@ -1756,7 +1810,17 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         refLabel,
         freshness: latestContext.freshness,
       })
+      if (sinkActionBinding) {
+        permissionRequest.context = {
+          ...(permissionRequest.context ?? {}),
+          sinkActionBindingSha256: digestCanonicalJson(sinkActionBinding),
+          sinkActionId: sinkActionBinding.actionId,
+          sinkDestinationOrigin: sinkActionBinding.destinationOrigin,
+          sinkContractRevision: sinkActionBinding.contractRevision,
+        }
+      }
       const permissionDecision = await decidePermission(permissionRequest, step)
+      let sinkApprovalBinding: ApprovalBinding | undefined
 
       if (permissionDecision.action === 'deny') {
         const note = `BLOCKED by permission [${permissionDecision.ruleId}]. ${permissionDecision.reason}`
@@ -1831,6 +1895,18 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         })
         const decision = gateResponse.decision
         const resolvedApproval = await resolveApproval(approval, decision, step, gateResponse.rememberScope)
+        if (decision === 'approve' && sinkActionBinding) {
+          const issuedAt = resolvedApproval.resolvedAt ?? new Date().toISOString()
+          sinkApprovalBinding = {
+            schemaVersion: 'approval-binding/v1',
+            approvalId: resolvedApproval.approvalId,
+            actionBindingSha256: digestCanonicalJson(sinkActionBinding),
+            decision: 'approved',
+            issuedAt,
+            expiresAt: sinkActionBinding.expiresAt,
+            nonce: `${resolvedApproval.approvalId}:${sinkActionBinding.actionId}`,
+          }
+        }
         await rememberPermissionDecision({
           input,
           request: permissionRequest,
@@ -1956,6 +2032,40 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
 
       if (input.abortSignal?.aborted) return { continueTurn: false, abortRequested: true }
 
+      if (sinkPreparation && sinkActionKind) {
+        const sinkDecision = evaluateSinkPolicy({
+          actionKind: sinkActionKind,
+          runId: session?.session.runId ?? ctx.trace.runId,
+          revision: input.taskContract?.revision ?? 0,
+          policy: input.taskPolicy,
+          sourceItems: sinkSourceItems,
+          payload: call.arguments,
+          ...(sinkSourceOrigin ? { sourceOrigin: sinkSourceOrigin } : {}),
+          ...(sinkDestinationOrigin ? { destinationOrigin: sinkDestinationOrigin } : {}),
+          ...(sinkActionBinding ? { actionBinding: sinkActionBinding } : {}),
+          ...(sinkApprovalBinding ? { approvalBinding: sinkApprovalBinding } : {}),
+          consumedApprovalNonces: consumedSinkApprovalNonces,
+        })
+        if (sinkDecision.action !== 'allow') {
+          const observation = `BLOCKED by sink policy [${sinkDecision.reasonCode}]. ${sinkDecision.reason}`
+          await materializeTerminal(call, index, 'EARLIER_TOOL_BLOCKED', observation)
+          blockers.push(observation)
+          rememberRecentAction(recentActions, {
+            step,
+            toolName: call.name,
+            argumentsSummary: argBrief,
+            status: 'blocked',
+            risk,
+            observation,
+          })
+          blocked = true
+          done = true
+          summary = observation
+          emit('gate', observation, step)
+          return { continueTurn: false, stopCode: 'EARLIER_TOOL_BLOCKED' }
+        }
+      }
+
       let preAgentDoneWorkflowEvaluation: WorkflowEngineEvaluation | undefined
       if (call.name === 'agent_done') {
         await refreshLatestContextForAgentDone(step)
@@ -2022,7 +2132,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         name: call.name,
         toolName: call.name,
         toolCategory,
-        input: call.arguments,
+        input: safeCallArgs,
         metadata: {
           step,
           toolCallId: call.id,
@@ -3172,6 +3282,29 @@ function briefArgs(name: string, args: Record<string, unknown>): string {
     parts.push(`${k}=${s}`)
   }
   return parts.length ? parts.join(', ') : '(no args)'
+}
+
+function sinkPolicyDecisionForPermission(
+  current: PolicyEngineDecision,
+  sink: SinkPolicyDecision,
+): PolicyEngineDecision {
+  const blocked = sink.action === 'deny'
+  return {
+    ...current,
+    action: blocked ? 'block' : 'gate',
+    riskLevel: blocked ? 'critical' : 'high',
+    reason: sink.reason,
+    policyCode: `security.sink.${sink.reasonCode}`,
+    ruleId: `security.sink.${sink.reasonCode}.v1`,
+    gateKind: 'high_risk_action',
+    auditTags: [
+      ...current.auditTags,
+      'security:sink_policy',
+      `sink:${sink.actionKind}`,
+      `sink-decision:${sink.action}`,
+      `sink-reason:${sink.reasonCode}`,
+    ],
+  }
 }
 
 function labelForClick(args: Record<string, unknown>, ctx: ToolContext): string {

@@ -74,6 +74,10 @@ export interface PermissionRequest {
   context?: {
     refLabel?: string
     freshness?: unknown
+    sinkActionBindingSha256?: string
+    sinkActionId?: string
+    sinkDestinationOrigin?: string
+    sinkContractRevision?: number
   }
 }
 

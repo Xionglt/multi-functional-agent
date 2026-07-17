@@ -16,7 +16,7 @@ import {
   type AgentRunController,
 } from './run-controller.js'
 import { createTurnStateSnapshot } from './turn-state.js'
-import type { ContextItem, TaskContract } from '../task/contracts.js'
+import type { ContextItem, TaskContract, TaskPolicy } from '../task/contracts.js'
 
 export interface AgentKernelInput {
   goal: string
@@ -37,6 +37,7 @@ export interface AgentKernelInput {
   safetyMode?: AgentSafetyMode
   taskType?: WebBuddyTaskType
   taskContract?: TaskContract
+  taskPolicy?: TaskPolicy
   session?: SessionRecorder
   controller?: AgentRunController
 }

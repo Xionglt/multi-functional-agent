@@ -27,6 +27,28 @@ export {
   frameInstructionData,
 } from './instruction-firewall.js'
 
+export { redactSensitiveData } from './redaction.js'
+export type { RedactionFinding, RedactionResult } from './redaction.js'
+
+export {
+  createSinkActionBinding,
+  destinationOriginForTool,
+  evaluateRedirectPolicy,
+  evaluateSinkPolicy,
+  sensitiveActionKindForTool,
+} from './sink-policy.js'
+export type {
+  SinkPolicyDecision,
+  SinkPolicyInput,
+  SinkPolicyReasonCode,
+} from './sink-policy.js'
+
+export { evaluateMemoryWritePolicy } from './memory-write-policy.js'
+export type {
+  MemoryWriteDecision,
+  MemoryWriteSecurityContext,
+} from './memory-write-policy.js'
+
 export type {
   FramedInstructionData,
   InstructionRiskKind,

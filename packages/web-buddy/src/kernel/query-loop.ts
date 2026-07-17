@@ -21,7 +21,7 @@ import {
   type TurnStateSnapshot,
 } from './turn-state.js'
 import { createTokenBudgetSnapshot, type TokenBudgetSnapshot } from './token-budget.js'
-import type { ContextItem, TaskContract } from '../task/contracts.js'
+import type { ContextItem, TaskContract, TaskPolicy } from '../task/contracts.js'
 
 export interface QueryLoopInput {
   goal: string
@@ -42,6 +42,7 @@ export interface QueryLoopInput {
   safetyMode?: AgentSafetyMode
   taskType?: WebBuddyTaskType
   taskContract?: TaskContract
+  taskPolicy?: TaskPolicy
   permissionMode?: PermissionMode
   allowFinalSubmit?: boolean
   session?: SessionRecorder
@@ -98,6 +99,7 @@ export class QueryLoop {
         safetyMode: input.safetyMode,
         taskType: input.taskType,
         taskContract: input.taskContract,
+        taskPolicy: input.taskPolicy,
         permissionMode: input.permissionMode,
         allowFinalSubmit: input.allowFinalSubmit,
         session: input.session,

@@ -36,6 +36,7 @@ export class AgentRuntime {
       safetyMode: input.safetyMode,
       taskType: input.taskType,
       taskContract: input.taskContract,
+      taskPolicy: input.taskPolicy,
       session: input.session,
       controller: input.controller,
     })

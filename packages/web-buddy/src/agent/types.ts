@@ -12,7 +12,7 @@ import type { TaskState } from '../task/task-state.js'
 import type { RunMemory } from '../context/run-memory.js'
 import type { WebBuddyTaskType } from '../workflow/completion-gate.js'
 import type { WorkflowState } from '../workflow/workflow-state.js'
-import type { ContextItem, TaskContract } from '../task/contracts.js'
+import type { ContextItem, TaskContract, TaskPolicy } from '../task/contracts.js'
 
 export type AgentSafetyMode = 'guarded' | 'raw'
 
@@ -54,6 +54,7 @@ export interface AgentRuntimeInput {
   /** Explicit task contract for completion criteria. */
   taskType?: WebBuddyTaskType
   taskContract?: TaskContract
+  taskPolicy?: TaskPolicy
   /** Optional append-only session recorder for resumable runtime state. */
   session?: SessionRecorder
   /** Optional kernel-level run controller for abort/pause/status integration. */

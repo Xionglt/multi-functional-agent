@@ -248,6 +248,7 @@ const defaultWebTaskRuntimeDriver: WebTaskRuntimeDriver = {
         goal: request.input.goal.instruction,
         contextItems: request.contextItems,
         taskContract: request.input.contract,
+        taskPolicy: request.input.policy,
         llm,
         registry: new ToolRegistry(createLocalTools(genericDefs)),
         ctx: { sessionId, highlight: config.browser.visualHighlight, trace },

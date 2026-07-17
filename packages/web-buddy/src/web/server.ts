@@ -36,6 +36,7 @@ const SOURCE_FILE = fileURLToPath(import.meta.url)
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..')
 const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled'])
+const MAX_LIVE_EVENTS_PER_RUN = 1000
 
 function outputDir(): string {
   return resolve(loadConfig().trace.outDir)
@@ -101,6 +102,9 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
   const emitRun = (runId: string, event: AgentEvent) => {
     const channel = channelFor(runId)
     channel.events.push(event)
+    if (channel.events.length > MAX_LIVE_EVENTS_PER_RUN) {
+      channel.events.splice(0, channel.events.length - MAX_LIVE_EVENTS_PER_RUN)
+    }
     for (const subscriber of channel.subscribers) {
       subscriber.write(`data: ${JSON.stringify(event)}\n\n`)
     }
@@ -121,6 +125,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       subscriber.end()
     }
     channel.subscribers.clear()
+    channels.delete(record.runId)
   }
 
   async function launch(record: RunRecord, launchOptions = launchOptionsFromRecord(record)): Promise<void> {
@@ -472,7 +477,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       const runId = query('id')
       const run = runId ? await runService.get(runId) : undefined
       if (!runId || !run) return send(res, 404, { error: 'unknown runId' })
-      const channel = channelFor(runId)
+      const channel = channels.get(runId) ?? { events: [], subscribers: new Set<ServerResponse>() }
       res.writeHead(200, {
         'content-type': 'text/event-stream',
         'cache-control': 'no-cache, no-transform',
@@ -486,6 +491,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         res.end()
         return
       }
+      channels.set(runId, channel)
       channel.subscribers.add(res)
       req.on('close', () => channel.subscribers.delete(res))
       return

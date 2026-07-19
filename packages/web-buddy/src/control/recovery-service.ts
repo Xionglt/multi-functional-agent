@@ -1,4 +1,4 @@
-import type { RunRecord } from './store-contracts.js'
+import type { RunRecord, ScopedStoreQuery } from './store-contracts.js'
 import { ApprovalService, RunService } from './run-service.js'
 
 export interface RecoveryDecision {
@@ -24,8 +24,9 @@ export class RecoveryService {
     readonly options: RecoveryServiceOptions = {},
   ) {}
 
-  async recoverStartupRuns(): Promise<RecoveryDecision[]> {
+  async recoverStartupRuns(scope?: ScopedStoreQuery): Promise<RecoveryDecision[]> {
     const page = await this.runs.list({
+      ...(scope?.ownerScope ? { ownerScope: scope.ownerScope } : {}),
       states: ['running', 'pausing', 'resuming', 'cancelling'],
       limit: 1000,
     })
@@ -39,11 +40,12 @@ export class RecoveryService {
           idempotencyKey: `startup-cancel-failed:${record.recordRevision}`,
           eventType: 'recovery_classified',
           data: { recoverable: false, replayedAction: false },
-        })
+        }, scope)
         await this.approvals.cancelPendingForRun(
           record.runId,
           'Run was interrupted while cancellation was settling.',
           `startup-cancel-approvals:${record.runRevision}:${record.attempt}`,
+          scope,
         )
         decisions.push({ runId: record.runId, fromState: record.state, toState: failed.state, recoverable: false, reason })
         continue
@@ -61,11 +63,13 @@ export class RecoveryService {
         recoverable,
         reason,
         `startup-recovery:${record.recordRevision}`,
+        scope,
       )
       await this.approvals.cancelPendingForRun(
         record.runId,
         'Approval invalidated by process restart and run interruption.',
         `startup-approval-fence:${record.runRevision}:${record.attempt}`,
+        scope,
       )
       decisions.push({
         runId: record.runId,

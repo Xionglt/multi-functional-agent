@@ -6,9 +6,9 @@
  * controllers; neither is a source of truth.
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createReadStream, existsSync, readFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { extname, join, normalize, resolve } from 'node:path'
+import { join, normalize, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   ApprovalService,
@@ -19,22 +19,49 @@ import {
   RecoveryService,
   RunService,
   RunServiceError,
+  type ApprovalRecord,
   type RunRecord,
+  type RunStoreEvent,
 } from '../control/index.js'
 import { createAgentRunController, type AgentRunController } from '../kernel/run-controller.js'
+import {
+  createFileMemoryLifecycle,
+  type MemoryLifecycleRecord,
+  type MemoryLifecycleService,
+} from '../memory/index.js'
 import { RISK_DECISIONS_ARTIFACT } from '../policy/risk-decisions.js'
-import { loadConfig, type AgentConfig, type ModelConfig } from '../sdk/config.js'
+import {
+  PUBLIC_ARTIFACT_LIST_SCHEMA_VERSION,
+  PUBLIC_APPROVAL_LIST_SCHEMA_VERSION,
+  PUBLIC_APPROVAL_SCHEMA_VERSION,
+  PUBLIC_RUN_EVENTS_SCHEMA_VERSION,
+  PUBLIC_RUN_LIST_SCHEMA_VERSION,
+  PUBLIC_RUN_SCHEMA_VERSION,
+} from '../public/clients.js'
+import { serviceScopeKey, type ServiceScope } from '../public/service-contracts.js'
+import { loadConfig, type AgentConfig } from '../sdk/config.js'
 import { runJobApplicationAgent, type AgentEvent, type AgentRunResult, type RunOptions } from '../sdk/orchestrator.js'
 import { sessionManager } from '../session/manager.js'
 import { FileSessionStore } from '../session/index.js'
-import { snapshotWebTaskInput, type JsonObject } from '../task/contracts.js'
+import {
+  digestCanonicalJson,
+  snapshotWebTaskInput,
+  type JsonObject,
+  type OwnerScope,
+  type WebTaskInput,
+  type WebTaskInputSnapshot,
+} from '../task/contracts.js'
 import type { WebBuddyTaskType } from '../workflow/completion-gate.js'
 import INDEX_HTML from './public/index.html'
 import VENUE_BOOKING_HTML from './public/venue-booking.html'
+import {
+  WebServiceSecurityBoundary,
+  type ServicePrincipal,
+  type WebServiceSecurityOptions,
+} from './service-security.js'
 
 const SOURCE_FILE = fileURLToPath(import.meta.url)
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
-const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..')
 const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled'])
 const MAX_LIVE_EVENTS_PER_RUN = 1000
 
@@ -68,27 +95,49 @@ interface LiveExecution {
 
 export interface WebControlServerOptions {
   controlStoreDir?: string
+  memoryDir?: string
   disableExecution?: boolean
+  serviceSecurity?: WebServiceSecurityOptions
 }
 
 export function createWebControlServer(options: WebControlServerOptions = {}) {
   const controlStoreDir = options.controlStoreDir
     ? resolve(options.controlStoreDir)
     : resolve(process.env.WEB_BUDDY_CONTROL_STORE_DIR || join(outputDir(), 'control-plane'))
-  const runService = new RunService(new FileRunStore({ rootDir: controlStoreDir }))
+  const runStore = new FileRunStore({ rootDir: controlStoreDir })
+  const runService = new RunService(runStore)
   const approvalService = new ApprovalService(new FileApprovalStore({ rootDir: controlStoreDir }))
+  const security = new WebServiceSecurityBoundary({
+    rootDir: controlStoreDir,
+    options: options.serviceSecurity,
+  })
+  const memoryRoot = resolve(
+    options.memoryDir
+      ?? process.env.WEB_BUDDY_MEMORY_DIR
+      ?? join(controlStoreDir, 'memory'),
+  )
   const sessionStore = new FileSessionStore({ rootDir: join(outputDir(), 'sessions') })
   const recoveryService = new RecoveryService(runService, approvalService, {
     canRestoreSession: async (record) => Boolean(record.sessionRef && await sessionStore.get(record.sessionRef.id)),
   })
   const channels = new Map<string, LiveChannel>()
   const executions = new Map<string, LiveExecution>()
-  let modelOverride: Partial<ModelConfig> = {}
+  const memories = new Map<string, MemoryLifecycleService>()
 
   const mergeConfig = (base: AgentConfig): AgentConfig => ({
     ...base,
-    model: { ...base.model, ...modelOverride } as ModelConfig,
+    model: {
+      ...base.model,
+      apiKey: null,
+      authToken: null,
+    },
   })
+
+  const runtimeConfig = async (): Promise<AgentConfig> => {
+    const config = mergeConfig(loadConfig())
+    await security.secretProvider.injectModelCredential(config)
+    return config
+  }
 
   const channelFor = (runId: string): LiveChannel => {
     let channel = channels.get(runId)
@@ -101,25 +150,26 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
 
   const emitRun = (runId: string, event: AgentEvent) => {
     const channel = channelFor(runId)
-    channel.events.push(event)
+    const sanitized = security.sanitize(event)
+    channel.events.push(sanitized)
     if (channel.events.length > MAX_LIVE_EVENTS_PER_RUN) {
       channel.events.splice(0, channel.events.length - MAX_LIVE_EVENTS_PER_RUN)
     }
     for (const subscriber of channel.subscribers) {
-      subscriber.write(`data: ${JSON.stringify(event)}\n\n`)
+      subscriber.write(`data: ${JSON.stringify(sanitized)}\n\n`)
     }
   }
 
   const endRun = (record: RunRecord, result?: AgentRunResult, error?: string) => {
     const channel = channelFor(record.runId)
-    const terminal = JSON.stringify({
+    const terminal = JSON.stringify(security.sanitize({
       _end: true,
       state: record.state,
       error,
       finalState: result?.finalState,
       message: result?.message,
       summary: result?.summary,
-    })
+    }))
     for (const subscriber of channel.subscribers) {
       subscriber.write(`data: ${terminal}\n\n`)
       subscriber.end()
@@ -130,13 +180,14 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
 
   async function launch(record: RunRecord, launchOptions = launchOptionsFromRecord(record)): Promise<void> {
     if (options.disableExecution) return
+    const scope = scoped(record.ownerScope)
     const controller = createAgentRunController()
     const running = await runService.transition(record.runId, {
       to: 'running',
       idempotencyKey: `launch:${record.runRevision}:${record.attempt}`,
       expectedRunRevision: record.runRevision,
       expectedAttempt: record.attempt,
-    })
+    }, scope)
     const sessionId = launchOptions.restoredSessionId ?? `control-${running.runId}-a${running.attempt}`
     const gate = new DurableHumanGate({
       runs: runService,
@@ -147,6 +198,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       taskContract: running.inputSnapshot.contract,
       sessionId,
       abortSignal: controller.signal,
+      ...(running.ownerScope ? { ownerScope: running.ownerScope } : {}),
     })
     executions.set(record.runId, {
       controller,
@@ -155,9 +207,8 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       attempt: running.attempt,
     })
 
-    const config = mergeConfig(loadConfig())
+    const config = await runtimeConfig()
     config.human.mode = 'auto'
-    allowStartUrl(config, launchOptions.startUrl)
     if (launchOptions.headless !== undefined) {
       config.browser.headless = launchOptions.headless
       config.browser.visualHighlight = !launchOptions.headless
@@ -185,7 +236,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
           id: session.sessionId,
           runId: running.runId,
           attempt: running.attempt,
-        }, `session:${running.runRevision}:${running.attempt}:${session.sessionId}`)
+        }, `session:${running.runRevision}:${running.attempt}:${session.sessionId}`, scope)
       },
       onEvent: (event) => emitRun(running.runId, event),
     }
@@ -207,7 +258,16 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     result?: AgentRunResult,
     error?: string,
   ): Promise<void> {
-    let current = await runService.get(launched.runId)
+    await security.redactTraceFiles([
+      join(outputDir(), launched.runId),
+      join(outputDir(), 'traces', `run_${launched.runId}`),
+    ])
+    const safeError = error === undefined ? undefined : String(security.sanitize(error))
+    const safeMessage = result?.message === undefined
+      ? undefined
+      : String(security.sanitize(result.message))
+    const scope = scoped(launched.ownerScope)
+    let current = await runService.get(launched.runId, scope)
     if (!current) return
     const traceRef = {
       schemaVersion: 'control-resource-ref/v1' as const,
@@ -221,12 +281,13 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         runId: launched.runId,
         runRevision: launched.runRevision,
         attempt: launched.attempt,
-        terminalState: error ? 'failed' : 'completed',
-        reason: error ?? result?.message,
+        terminalState: safeError ? 'failed' : 'completed',
+        reason: safeError ?? safeMessage,
         resourceRefs: [traceRef],
         idempotencyKey: `late-result:${launched.runRevision}:${launched.attempt}`,
+        ...(launched.ownerScope ? { ownerScope: launched.ownerScope } : {}),
       })
-      endRun(rejected.record, result, error)
+      endRun(rejected.record, result, safeError)
       return
     }
 
@@ -248,8 +309,8 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
             attempt: launched.attempt,
           },
         } : {}),
-      }, `pause-ack:${launched.runRevision}:${launched.attempt}`)
-      endRun(current, result, error)
+      }, `pause-ack:${launched.runRevision}:${launched.attempt}`, scope)
+      endRun(current, result, safeError)
       return
     }
 
@@ -259,25 +320,26 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         runRevision: launched.runRevision,
         attempt: launched.attempt,
         terminalState: 'cancelled',
-        reason: controller.reason ?? 'Cancelled by user.',
+        reason: String(security.sanitize(controller.reason ?? 'Cancelled by user.')),
         resourceRefs: [traceRef],
         idempotencyKey: `cancelled:${launched.runRevision}:${launched.attempt}`,
+        ...(launched.ownerScope ? { ownerScope: launched.ownerScope } : {}),
       })
-      endRun(decision.record, result, error)
+      endRun(decision.record, result, safeError)
       return
     }
 
     if (!error && result && isHumanBlocked(result.finalState)) {
       current = await runService.transition(launched.runId, {
         to: 'blocked_on_human',
-        reason: result.message,
+        reason: safeMessage,
         idempotencyKey: `blocked:${launched.runRevision}:${launched.attempt}`,
         expectedRunRevision: launched.runRevision,
         expectedAttempt: launched.attempt,
         update: (record) => ({
           resourceRefs: mergeResourceRefs(record.resourceRefs, [traceRef]),
         }),
-      })
+      }, scope)
       endRun(current, result)
       return
     }
@@ -287,23 +349,74 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       runRevision: launched.runRevision,
       attempt: launched.attempt,
       terminalState: error || result?.finalState === 'error' ? 'failed' : 'completed',
-      reason: error ?? result?.message,
+      reason: safeError ?? safeMessage,
       resourceRefs: [traceRef],
       idempotencyKey: `result:${launched.runRevision}:${launched.attempt}`,
+      ...(launched.ownerScope ? { ownerScope: launched.ownerScope } : {}),
     })
-    endRun(decision.record, result, error)
+    endRun(decision.record, result, safeError)
   }
 
-  async function createRun(body: Record<string, unknown>, idempotencyKey: string): Promise<RunRecord> {
-    const launchOptions = parseLaunchOptions(body)
-    const runId = `web-${createHash('sha256').update(idempotencyKey).digest('hex').slice(0, 24)}`
+  async function createRun(
+    body: Record<string, unknown>,
+    idempotencyKey: string,
+    principal: ServicePrincipal,
+    requestId: string,
+  ): Promise<RunRecord> {
+    rejectInlineSecrets(body, security)
+    const ownerScope = security.ownerScope(principal)
+    const scope = scoped(ownerScope)
+    const runId = `web-${createHash('sha256')
+      .update(`${serviceScopeKey(principal.scope)}\u0000${idempotencyKey}`)
+      .digest('hex')
+      .slice(0, 24)}`
+    const prepared = prepareRunInput(
+      body,
+      runId,
+      ownerScope,
+      process.env.WEB_BUDDY_ALLOW_PRIVATE_NETWORK_FOR_TESTING === 'true',
+    )
+    const quota = await security.reserveRun(principal, {
+      idempotencyKey,
+      requestDigest: digestCanonicalJson({
+        scope: principal.scope,
+        body,
+      }),
+    })
+    if (quota.decision === 'deny') {
+      await security.audit({
+        principal,
+        requestId,
+        action: 'quota.deny',
+        target: { kind: 'quota' },
+        result: 'denied',
+        reasonCode: quota.reasonCode,
+      })
+      throw new HttpError(
+        quota.reasonCode === 'idempotency_conflict' ? 409 : 429,
+        quota.reasonCode,
+      )
+    }
+    if (prepared.kind === 'snapshot') {
+      const existing = await runService.get(runId, scope)
+      if (existing) {
+        if (existing.inputDigest !== prepared.snapshot.sha256) {
+          throw new ControlStoreError('IDEMPOTENCY_CONFLICT', 'Create idempotency key was reused with different run input.')
+        }
+        return existing
+      }
+      const created = await runService.create(prepared.snapshot, { idempotencyKey })
+      channelFor(runId)
+      if (!created.replayed) await launch(created.record, launchOptionsFromRecord(created.record))
+      return (await runService.get(runId, scope)) ?? created.record
+    }
+    const launchOptions = prepared.launchOptions
     const metadata: JsonObject = {
       mode: launchOptions.mode,
       headless: launchOptions.headless ?? false,
       restartSafe: launchOptions.restartSafe,
       requiresCurrentResumeUpload: launchOptions.requiresCurrentResumeUpload ?? false,
       ...(launchOptions.taskType ? { taskType: launchOptions.taskType } : {}),
-      ...(launchOptions.resumePath ? { resumePath: launchOptions.resumePath } : {}),
     }
     const snapshot = snapshotWebTaskInput({
       schemaVersion: 'web-task-input/v1',
@@ -315,6 +428,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         metadata,
       },
       startUrl: launchOptions.startUrl,
+      ...(ownerScope ? { ownerScope } : {}),
       contract: {
         schemaVersion: 'web-task-contract/v1',
         contractId: 'web-control-plane-legacy-adapter',
@@ -329,7 +443,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         }],
       },
     })
-    const existing = await runService.get(runId)
+    const existing = await runService.get(runId, scope)
     if (existing) {
       if (existing.inputDigest !== snapshot.sha256) {
         throw new ControlStoreError('IDEMPOTENCY_CONFLICT', 'Create idempotency key was reused with different run input.')
@@ -339,11 +453,32 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     const created = await runService.create(snapshot, { idempotencyKey })
     channelFor(runId)
     if (!created.replayed) await launch(created.record, launchOptions)
-    return (await runService.get(runId)) ?? created.record
+    return (await runService.get(runId, scope)) ?? created.record
+  }
+
+  const memoryFor = (principal: ServicePrincipal): MemoryLifecycleService | undefined => {
+    if (principal.scope.kind !== 'tenant') return undefined
+    const key = serviceScopeKey(principal.scope)
+    let service = memories.get(key)
+    if (!service) {
+      service = createFileMemoryLifecycle({
+        root: memoryRoot,
+        actorScope: {
+          tenantId: principal.scope.tenantId,
+          userId: principal.scope.userId,
+          runId: `service-${createHash('sha256').update(key).digest('hex').slice(0, 24)}`,
+        },
+      }).service
+      memories.set(key, service)
+    }
+    return service
   }
 
   async function recoverStartupRuns(): Promise<void> {
     await recoveryService.recoverStartupRuns()
+    for (const ownerScope of await runStore.listOwnerScopes()) {
+      await recoveryService.recoverStartupRuns({ ownerScope })
+    }
   }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -362,56 +497,115 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       return
     }
 
+    if (!path.startsWith('/api/')) {
+      send(res, 404, { error: 'not_found' })
+      return
+    }
+
+    const principal = await security.authenticate(req, path)
+    if (!principal) {
+      send(res, 401, { error: 'unauthorized' })
+      return
+    }
+    assertRequestedScope(url, principal)
+    const ownerScope = security.ownerScope(principal)
+    const storeScope = scoped(ownerScope)
+    const requestId = requestIdentifier(req)
+    const respond = (status: number, body: unknown) => send(
+      res,
+      status,
+      security.sanitize(body),
+    )
+    const denyResource = async (target: {
+      kind: 'run' | 'approval' | 'artifact' | 'trace' | 'memory' | 'api'
+      id?: string
+    }) => {
+      await security.audit({
+        principal,
+        requestId,
+        action: 'auth.deny',
+        target,
+        result: 'denied',
+        reasonCode: 'resource_not_visible',
+      })
+      respond(404, { error: 'resource_not_visible' })
+    }
+
     if (path === '/api/config' && req.method === 'GET') {
       const config = mergeConfig(loadConfig())
-      send(res, 200, {
+      respond(200, {
         provider: config.model.provider,
         baseUrl: config.model.baseUrl,
         name: config.model.name,
-        hasKey: Boolean(config.model.apiKey || config.model.authToken),
-        keyPreview: config.model.apiKey
-          ? `${config.model.apiKey.slice(0, 6)}…`
-          : config.model.authToken ? `${config.model.authToken.slice(0, 6)}…` : '',
-        resumePath: config.resumePath,
+        credentialConfigured: security.secretProvider.credentialConfigured(),
         alibabaCareersUrl: config.alibabaCareersUrl,
       })
       return
     }
     if (path === '/api/config' && req.method === 'POST') {
-      const body = await readJsonBody(req)
-      const key = typeof body.key === 'string' ? body.key.trim() : ''
-      const provider = body.provider === 'openai' || body.provider === 'anthropic' ? body.provider : undefined
-      modelOverride = {
-        ...modelOverride,
-        ...(provider ? { provider } : {}),
-        ...(body.baseUrl ? { baseUrl: String(body.baseUrl) } : {}),
-        ...(body.name ? { name: String(body.name) } : {}),
-        ...(key ? { apiKey: key, authToken: key } : {}),
-      }
-      send(res, 200, { ok: true })
+      respond(403, {
+        error: 'server_config_required',
+        message: 'Model endpoints and credentials are controlled by server-side configuration.',
+      })
       return
     }
 
     if ((path === '/api/run' || path === '/api/runs') && req.method === 'POST') {
       const body = await readJsonBody(req)
-      const idempotencyKey = requestIdempotencyKey(req, body, `create:${randomUUID()}`)
-      const run = await createRun(body, idempotencyKey)
-      send(res, 201, { runId: run.runId, runtime: 'web-buddy', mode: run.inputSnapshot.goal.metadata?.mode, state: run.state })
+      assertBodyScope(body, principal)
+      const externalKey = path === '/api/runs'
+        ? requireIdempotencyKey(req, body)
+        : requestIdempotencyKey(req, body, `create:${randomUUID()}`)
+      const idempotencyKey = security.bindIdempotencyKey(principal, externalKey)
+      const run = await createRun(body, idempotencyKey, principal, requestId)
+      await security.audit({
+        principal,
+        requestId,
+        action: 'run.create',
+        target: { kind: 'run', id: run.runId },
+        result: 'succeeded',
+      })
+      respond(201, projectPublicRun(run, principal.scope))
       return
     }
 
     if (path === '/api/runs' && req.method === 'GET') {
-      const page = await runService.list({ limit: numberQuery(query('limit'), 100) })
-      send(res, 200, { items: page.items, nextCursor: page.nextCursor })
+      const page = await runService.list({
+        ...(ownerScope ? { ownerScope } : {}),
+        limit: numberQuery(query('limit'), 100),
+      })
+      respond(200, {
+        schemaVersion: PUBLIC_RUN_LIST_SCHEMA_VERSION,
+        items: page.items.map((run) => projectPublicRun(run, principal.scope)),
+        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+      })
       return
     }
 
     const runMatch = path.match(/^\/api\/runs\/([^/]+)$/)
     if (runMatch && req.method === 'GET') {
-      const run = await runService.get(decodeURIComponent(runMatch[1]))
-      if (!run) return send(res, 404, { error: 'unknown runId' })
-      const events = await runService.events(run.runId)
-      send(res, 200, { run, events: events.items })
+      const runId = decodeURIComponent(runMatch[1])
+      const run = await runService.get(runId, storeScope)
+      if (!run) return denyResource({ kind: 'run' })
+      respond(200, projectPublicRun(run, principal.scope))
+      return
+    }
+
+    const runEventsMatch = path.match(/^\/api\/runs\/([^/]+)\/events$/)
+    if (runEventsMatch && req.method === 'GET') {
+      const runId = decodeURIComponent(runEventsMatch[1])
+      const run = await runService.get(runId, storeScope)
+      if (!run) return denyResource({ kind: 'run' })
+      const events = await runService.events(runId, {
+        ...(ownerScope ? { ownerScope } : {}),
+        ...(query('afterSequence') ? { afterSequence: numberQuery(query('afterSequence'), 0) } : {}),
+      })
+      respond(200, {
+        schemaVersion: PUBLIC_RUN_EVENTS_SCHEMA_VERSION,
+        scope: principal.scope,
+        runId,
+        items: events.items.map(projectRunEvent),
+      })
       return
     }
 
@@ -420,30 +614,59 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       const runId = decodeURIComponent(controlMatch[1])
       const control = controlMatch[2]
       const body = await readJsonBody(req)
-      const idempotencyKey = requestIdempotencyKey(req, body, `${control}:${runId}:${randomUUID()}`)
+      assertBodyScope(body, principal)
+      const visible = await runService.get(runId, storeScope)
+      if (!visible) return denyResource({ kind: 'run' })
+      const expectedRevision = requireExpectedRevision(body)
+      if (expectedRevision !== visible.runRevision) {
+        throw new ControlStoreError(
+          'REVISION_CONFLICT',
+          'Run revision does not match the requested control revision.',
+          expectedRevision,
+          visible.runRevision,
+        )
+      }
+      const idempotencyKey = security.bindIdempotencyKey(
+        principal,
+        requireIdempotencyKey(req, body),
+      )
       if (control === 'pause') {
-        const run = await runService.requestPause(runId, idempotencyKey)
+        const run = await runService.requestPause(runId, idempotencyKey, storeScope)
         executions.get(runId)?.controller.requestPause('Pause requested from control plane.')
-        send(res, 202, { run })
+        await security.audit({
+          principal,
+          requestId,
+          action: 'run.pause',
+          target: { kind: 'run', id: runId },
+          result: 'succeeded',
+        })
+        respond(202, projectPublicRun(run, principal.scope))
         return
       }
       if (control === 'cancel') {
-        const run = await runService.requestCancel(runId, idempotencyKey)
+        const run = await runService.requestCancel(runId, idempotencyKey, storeScope)
         executions.get(runId)?.controller.abort('Cancel requested from control plane.')
         await approvalService.cancelPendingForRun(
           runId,
           'Run was cancelled while awaiting approval.',
           `cancel-approval-fence:${run.runRevision}:${run.attempt}`,
+          storeScope,
         )
-        send(res, 202, { run })
+        await security.audit({
+          principal,
+          requestId,
+          action: 'run.cancel',
+          target: { kind: 'run', id: runId },
+          result: 'succeeded',
+        })
+        respond(202, projectPublicRun(run, principal.scope))
         return
       }
-      const current = await runService.get(runId)
-      if (!current) return send(res, 404, { error: 'unknown runId' })
+      const current = visible
       const restartSafe = current.inputSnapshot.goal.metadata?.restartSafe === true
       const restoredSessionId = current.sessionRef?.id ?? current.lastSafeBoundary?.sessionRef?.id
       if (!restartSafe || !restoredSessionId) {
-        return send(res, 409, {
+        return respond(409, {
           error: 'resume_requires_safe_session',
           message: 'Resume requires a durable session plus an explicit read-only restart contract; the server will not replay a prior write action.',
         })
@@ -452,31 +675,53 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         runId,
         'Approval invalidated when resume created a new run revision.',
         `resume-approval-fence:${current.runRevision}:${current.attempt}`,
+        storeScope,
       )
-      const resuming = await runService.resume(runId, idempotencyKey)
+      const resuming = await runService.resume(runId, idempotencyKey, storeScope)
       await launch(resuming, { ...launchOptionsFromRecord(resuming), restoredSessionId })
-      send(res, 202, { run: (await runService.get(runId)) ?? resuming })
+      const resumed = (await runService.get(runId, storeScope)) ?? resuming
+      await security.audit({
+        principal,
+        requestId,
+        action: 'run.resume',
+        target: { kind: 'run', id: runId },
+        result: 'succeeded',
+      })
+      respond(202, projectPublicRun(resumed, principal.scope))
       return
     }
 
     if (path === '/api/stop' && req.method === 'POST') {
       const runId = query('id')
-      if (!runId) return send(res, 400, { error: 'runId is required' })
-      const run = await runService.requestCancel(runId, `legacy-stop:${runId}:${randomUUID()}`)
+      if (!runId) return respond(400, { error: 'runId is required' })
+      if (!await runService.get(runId, storeScope)) return denyResource({ kind: 'run' })
+      const run = await runService.requestCancel(
+        runId,
+        `legacy-stop:${runId}:${randomUUID()}`,
+        storeScope,
+      )
       executions.get(runId)?.controller.abort('Cancel requested from legacy stop endpoint.')
       await approvalService.cancelPendingForRun(
         runId,
         'Run was cancelled from the legacy stop endpoint.',
         `legacy-cancel-approval-fence:${run.runRevision}:${run.attempt}`,
+        storeScope,
       )
-      send(res, 202, { ok: true, run })
+      await security.audit({
+        principal,
+        requestId,
+        action: 'run.cancel',
+        target: { kind: 'run', id: runId },
+        result: 'succeeded',
+      })
+      respond(202, { ok: true, run: projectPublicRun(run, principal.scope) })
       return
     }
 
     if (path === '/api/events' && req.method === 'GET') {
       const runId = query('id')
-      const run = runId ? await runService.get(runId) : undefined
-      if (!runId || !run) return send(res, 404, { error: 'unknown runId' })
+      const run = runId ? await runService.get(runId, storeScope) : undefined
+      if (!runId || !run) return denyResource({ kind: 'run' })
       const channel = channels.get(runId) ?? { events: [], subscribers: new Set<ServerResponse>() }
       res.writeHead(200, {
         'content-type': 'text/event-stream',
@@ -499,33 +744,56 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
 
     if ((path === '/api/trace' || path.match(/^\/api\/runs\/[^/]+\/trace$/)) && req.method === 'GET') {
       const runId = path === '/api/trace' ? query('id') : decodeURIComponent(path.split('/')[3])
-      if (!runId) return send(res, 400, { error: 'runId is required' })
-      const run = await runService.get(runId)
-      if (!run) return send(res, 404, { error: 'unknown runId' })
-      send(res, 200, tracePayload(run))
+      if (!runId) return respond(400, { error: 'runId is required' })
+      const run = await runService.get(runId, storeScope)
+      if (!run) return denyResource({ kind: 'trace' })
+      await security.audit({
+        principal,
+        requestId,
+        action: 'trace.read',
+        target: { kind: 'trace', id: runId },
+        result: 'succeeded',
+      })
+      respond(200, projectTrace(run, principal.scope))
       return
     }
 
     const artifactMatch = path.match(/^\/api\/runs\/([^/]+)\/artifacts$/)
     if (artifactMatch && req.method === 'GET') {
-      const run = await runService.get(decodeURIComponent(artifactMatch[1]))
-      if (!run) return send(res, 404, { error: 'unknown runId' })
-      send(res, 200, {
+      const runId = decodeURIComponent(artifactMatch[1])
+      const run = await runService.get(runId, storeScope)
+      if (!run) return denyResource({ kind: 'artifact' })
+      await security.audit({
+        principal,
+        requestId,
+        action: 'artifact.read',
+        target: { kind: 'artifact', id: runId },
+        result: 'succeeded',
+      })
+      respond(200, {
+        schemaVersion: PUBLIC_ARTIFACT_LIST_SCHEMA_VERSION,
+        scope: principal.scope,
         runId: run.runId,
-        artifacts: run.artifactRefs,
-        resources: run.resourceRefs,
-        discovered: discoverTraceArtifacts(run.runId),
+        items: run.artifactRefs.map((artifact) => security.sanitize({
+          ...artifact,
+          locator: `artifact:${encodeURIComponent(artifact.id)}`,
+        })),
       })
       return
     }
 
     if (path === '/api/approvals' && req.method === 'GET') {
       const page = await approvalService.list({
+        ...(ownerScope ? { ownerScope } : {}),
         ...(query('runId') ? { runId: query('runId') } : {}),
         statuses: ['pending'],
         limit: numberQuery(query('limit'), 100),
       })
-      send(res, 200, { items: page.items, nextCursor: page.nextCursor })
+      respond(200, {
+        schemaVersion: PUBLIC_APPROVAL_LIST_SCHEMA_VERSION,
+        items: page.items.map((approval) => projectPublicApproval(approval, principal.scope)),
+        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+      })
       return
     }
 
@@ -533,9 +801,20 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     if (approvalMatch && req.method === 'POST') {
       const approvalId = decodeURIComponent(approvalMatch[1])
       const body = await readJsonBody(req)
-      const approval = await approvalService.get(approvalId)
-      if (!approval) return send(res, 404, { error: 'unknown approvalId' })
-      const approvalRun = await runService.get(approval.runId)
+      assertBodyScope(body, principal)
+      const approval = await approvalService.get(approvalId, storeScope)
+      if (!approval) {
+        await security.audit({
+          principal,
+          requestId,
+          action: 'approval.resolve',
+          target: { kind: 'approval', id: approvalId },
+          result: 'denied',
+          reasonCode: 'resource_not_visible',
+        })
+        return denyResource({ kind: 'approval' })
+      }
+      const approvalRun = await runService.get(approval.runId, storeScope)
       if (!approvalRun
         || approvalRun.runRevision !== approval.runRevision
         || approvalRun.attempt !== approval.attempt) {
@@ -544,13 +823,29 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
           'Approval belongs to a stale run revision/attempt and cannot be resolved.',
         )
       }
+      const expectedRevision = requireExpectedRevision(body)
+      if (expectedRevision !== approval.runRevision) {
+        throw new ControlStoreError(
+          'REVISION_CONFLICT',
+          'Approval run revision does not match the requested revision.',
+          expectedRevision,
+          approval.runRevision,
+        )
+      }
       const decision = body.decision === 'approved' || body.decision === 'denied' ? body.decision : undefined
-      if (!decision) return send(res, 400, { error: 'decision must be approved or denied' })
+      if (!decision) return respond(400, { error: 'decision must be approved or denied' })
+      const idempotencyKey = security.bindIdempotencyKey(
+        principal,
+        requireIdempotencyKey(req, body),
+      )
       const record = await approvalService.resolve({
         approvalId,
+        ...(ownerScope ? { ownerScope } : {}),
         expectedRecordRevision: typeof body.expectedRecordRevision === 'number'
           ? body.expectedRecordRevision
-          : approval.recordRevision,
+          : approval.status === 'pending'
+            ? approval.recordRevision
+            : Math.max(0, approval.recordRevision - 1),
         expectation: {
           runId: approval.runId,
           runRevision: approval.runRevision,
@@ -562,12 +857,74 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
           ...(approval.actionBinding.destinationOrigin ? { destinationOrigin: approval.actionBinding.destinationOrigin } : {}),
         },
         decision,
-        idempotencyKey: requestIdempotencyKey(req, body, `resolve:${approvalId}:${randomUUID()}`),
-        nonce: randomUUID(),
+        idempotencyKey,
+        nonce: `approval-nonce:${createHash('sha256').update(idempotencyKey).digest('hex')}`,
         expiresAt: approval.expiresAt,
       })
       const resumedLive = await executions.get(approval.runId)?.gate.resolveLive(approvalId, decision) ?? false
-      send(res, 200, { approval: record, resumedLive })
+      await security.audit({
+        principal,
+        requestId,
+        action: 'approval.resolve',
+        target: { kind: 'approval', id: approvalId },
+        result: 'succeeded',
+        metadata: { resumedLive },
+      })
+      respond(200, projectPublicApproval(record, principal.scope))
+      return
+    }
+
+    if (path === '/api/memories' && req.method === 'GET') {
+      const service = memoryFor(principal)
+      const items = service && principal.scope.kind === 'tenant'
+        ? await service.list({
+            schemaVersion: 'memory-lifecycle-list/v2',
+            scope: {
+              kind: 'user',
+              tenantId: principal.scope.tenantId,
+              userId: principal.scope.userId,
+            },
+          })
+        : []
+      await security.audit({
+        principal,
+        requestId,
+        action: 'memory.read',
+        target: { kind: 'memory' },
+        result: 'succeeded',
+      })
+      respond(200, {
+        schemaVersion: 'public-memory-list/v1',
+        scope: principal.scope,
+        items: items.map(projectMemory),
+      })
+      return
+    }
+
+    const memoryMatch = path.match(/^\/api\/memories\/([^/]+)$/)
+    if (memoryMatch && req.method === 'GET') {
+      const service = memoryFor(principal)
+      const entryId = decodeURIComponent(memoryMatch[1])
+      const record = service && principal.scope.kind === 'tenant'
+        ? await service.get({
+            schemaVersion: 'memory-lifecycle-get/v2',
+            entryId,
+            scope: {
+              kind: 'user',
+              tenantId: principal.scope.tenantId,
+              userId: principal.scope.userId,
+            },
+          })
+        : undefined
+      if (!record) return denyResource({ kind: 'memory' })
+      await security.audit({
+        principal,
+        requestId,
+        action: 'memory.read',
+        target: { kind: 'memory', id: entryId },
+        result: 'succeeded',
+      })
+      respond(200, projectMemory(record))
       return
     }
 
@@ -575,31 +932,30 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       const runId = query('id')
       const name = normalize(query('name') || '')
       if (!runId || name.includes('..') || name.includes('/') || name.includes('\\')) {
-        return send(res, 400, { error: 'bad shot name' })
+        return respond(400, { error: 'bad shot name' })
       }
+      if (!await runService.get(runId, storeScope)) return denyResource({ kind: 'artifact' })
       const root = outputDir()
       const file = join(root, runId, name)
-      if (!file.startsWith(root) || !existsSync(file)) return send(res, 404, { error: 'not found' })
+      if (!file.startsWith(root) || !existsSync(file)) return respond(404, { error: 'not found' })
       res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' })
       createReadStream(file).pipe(res)
       return
     }
 
     if (path === '/api/resume' && req.method === 'POST') {
-      const buffer = await readBody(req)
-      const dir = join(REPO_ROOT, 'tmp', 'pdfs')
-      mkdirSync(dir, { recursive: true })
-      const file = join(dir, `resume-${Date.now()}${resumeExtension(req)}`)
-      writeFileSync(file, buffer)
-      send(res, 200, { path: file })
+      respond(410, {
+        error: 'secret_provider_required',
+        message: 'Sensitive profile material must be supplied through a dedicated server-side provider.',
+      })
       return
     }
 
-    send(res, 404, { error: `not found: ${req.method} ${path}` })
+    respond(404, { error: 'not_found' })
   }
 
   const server = createServer((req, res) => {
-    handle(req, res).catch((error) => sendControlError(res, error))
+    handle(req, res).catch((error) => sendControlError(res, error, security))
   })
 
   return {
@@ -607,6 +963,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     runService,
     approvalService,
     recoveryService,
+    serviceSecurity: security,
     controlStoreDir,
     recoverStartupRuns,
     async close() {
@@ -639,9 +996,223 @@ export async function startWebControlServer(port: number, retries = 0): Promise<
   return control
 }
 
-function parseLaunchOptions(body: Record<string, unknown>): LegacyLaunchOptions {
+type PreparedRunInput =
+  | { kind: 'legacy'; launchOptions: LegacyLaunchOptions }
+  | { kind: 'snapshot'; snapshot: WebTaskInputSnapshot }
+
+function prepareRunInput(
+  body: Record<string, unknown>,
+  runId: string,
+  ownerScope?: OwnerScope,
+  allowPrivateNetwork = false,
+): PreparedRunInput {
+  if (body.schemaVersion !== 'run-client-create/v1') {
+    return { kind: 'legacy', launchOptions: parseLaunchOptions(body, allowPrivateNetwork) }
+  }
+  const input = plainRecord(body.input, 'input')
+  if (input.schemaVersion !== 'web-task-input-snapshot/v1') {
+    throw new HttpError(400, 'input must be web-task-input-snapshot/v1')
+  }
+  if (input.sessionRef !== undefined) {
+    throw new HttpError(400, 'service create does not accept a pre-bound SessionRef')
+  }
+  if (Array.isArray(input.contextProviders) && input.contextProviders.length > 0) {
+    throw new HttpError(400, 'service create requires server-registered Context Providers')
+  }
+  if (input.ownerScope !== undefined
+    && digestCanonicalJson(input.ownerScope) !== digestCanonicalJson(ownerScope ?? null)) {
+    throw new HttpError(403, 'scope_mismatch')
+  }
+  const startUrl = input.startUrl === undefined
+    ? undefined
+    : normalizeRequiredUrl(input.startUrl, allowPrivateNetwork)
+  if (input.startUrl !== undefined && !startUrl) {
+    throw new HttpError(400, 'startUrl must use HTTP(S) and must not target a private network')
+  }
+  const candidate: WebTaskInput = {
+    schemaVersion: 'web-task-input/v1',
+    goal: input.goal as WebTaskInput['goal'],
+    contract: input.contract as WebTaskInput['contract'],
+    ...(startUrl ? { startUrl } : {}),
+    ...(Array.isArray(input.contextItems)
+      ? { contextItems: input.contextItems as WebTaskInput['contextItems'] }
+      : {}),
+    ...(input.policy ? { policy: input.policy as WebTaskInput['policy'] } : {}),
+    runId,
+    revision: typeof input.revision === 'number' ? input.revision : 0,
+    ...(ownerScope ? { ownerScope } : {}),
+  }
+  return {
+    kind: 'snapshot',
+    snapshot: snapshotWebTaskInput(candidate, runId),
+  }
+}
+
+function rejectInlineSecrets(
+  body: Record<string, unknown>,
+  security: WebServiceSecurityBoundary,
+): void {
+  if ('resumePath' in body) {
+    throw new HttpError(400, 'sensitive_profile_requires_provider')
+  }
+  const sanitized = security.sanitize(body)
+  if (digestCanonicalJson(body) !== digestCanonicalJson(sanitized)) {
+    throw new HttpError(400, 'secret_material_not_allowed')
+  }
+  if (body.schemaVersion === 'run-client-create/v1') {
+    const input = body.input
+    const contextItems = input && typeof input === 'object' && !Array.isArray(input)
+      ? (input as Record<string, unknown>).contextItems
+      : undefined
+    if (Array.isArray(contextItems) && contextItems.some((item) => (
+      item && typeof item === 'object' && !Array.isArray(item)
+      && ((item as Record<string, unknown>).sensitivity === 'auth'
+        || (item as Record<string, unknown>).sensitivity === 'secret')
+    ))) {
+      throw new HttpError(400, 'secret_context_requires_provider')
+    }
+  }
+}
+
+function assertRequestedScope(url: URL, principal: ServicePrincipal): void {
+  const tenantId = url.searchParams.get('tenantId')
+  const userId = url.searchParams.get('userId')
+  if (!tenantId && !userId) return
+  if (principal.scope.kind !== 'tenant'
+    || (tenantId && tenantId !== principal.scope.tenantId)
+    || (userId && userId !== principal.scope.userId)) {
+    throw new HttpError(403, 'scope_mismatch')
+  }
+}
+
+function assertBodyScope(body: Record<string, unknown>, principal: ServicePrincipal): void {
+  const tenantId = typeof body.tenantId === 'string' ? body.tenantId : undefined
+  const userId = typeof body.userId === 'string' ? body.userId : undefined
+  if (tenantId || userId) {
+    if (principal.scope.kind !== 'tenant'
+      || (tenantId && tenantId !== principal.scope.tenantId)
+      || (userId && userId !== principal.scope.userId)) {
+      throw new HttpError(403, 'scope_mismatch')
+    }
+  }
+  if (body.scope && typeof body.scope === 'object' && !Array.isArray(body.scope)) {
+    if (digestCanonicalJson(body.scope) !== digestCanonicalJson(principal.scope)) {
+      throw new HttpError(403, 'scope_mismatch')
+    }
+  }
+}
+
+function projectPublicRun(run: RunRecord, scope: ServiceScope) {
+  return {
+    schemaVersion: PUBLIC_RUN_SCHEMA_VERSION,
+    runId: run.runId,
+    revision: run.runRevision,
+    attempt: run.attempt,
+    state: run.state,
+    scope,
+    updatedAt: run.updatedAt,
+    ...(run.reason ? { reason: run.reason } : {}),
+  }
+}
+
+function projectPublicApproval(approval: ApprovalRecord, scope: ServiceScope) {
+  return {
+    schemaVersion: PUBLIC_APPROVAL_SCHEMA_VERSION,
+    approvalId: approval.approvalId,
+    runId: approval.runId,
+    revision: approval.runRevision,
+    attempt: approval.attempt,
+    status: approval.status,
+    scope,
+    action: {
+      actionId: approval.actionBinding.actionId,
+      kind: approval.actionBinding.toolName,
+      ...(approval.actionBinding.sourceOrigin
+        ? { sourceOrigin: approval.actionBinding.sourceOrigin }
+        : {}),
+      ...(approval.actionBinding.destinationOrigin
+        ? { destinationOrigin: approval.actionBinding.destinationOrigin }
+        : {}),
+    },
+    requestedAt: approval.requestedAt,
+    expiresAt: approval.expiresAt,
+  }
+}
+
+function projectRunEvent(event: RunStoreEvent) {
+  return {
+    schemaVersion: 'web-task-event/v1' as const,
+    sequence: event.eventSequence,
+    type: event.eventType,
+    timestamp: event.occurredAt,
+    runId: event.runId,
+    revision: event.runRevision,
+    ...(event.data ? { data: event.data } : {}),
+  }
+}
+
+function projectTrace(run: RunRecord, scope: ServiceScope) {
+  const dir = join(outputDir(), run.runId)
+  const traceFile = join(dir, 'trace.jsonl')
+  const summaryFile = join(dir, 'summary.json')
+  const traceDir = join(outputDir(), 'traces', `run_${run.runId}`)
+  const spansFile = join(traceDir, 'spans.jsonl')
+  const eventsFile = join(traceDir, 'events.jsonl')
+  const metricsFile = join(traceDir, 'metrics.json')
+  const agentStateFile = join(traceDir, 'agent-state.json')
+  const riskDecisionsFile = join(traceDir, 'artifacts', RISK_DECISIONS_ARTIFACT)
+  return {
+    schemaVersion: 'public-trace/v1',
+    scope,
+    runId: run.runId,
+    revision: run.runRevision,
+    attempt: run.attempt,
+    state: run.state,
+    done: TERMINAL_STATES.has(run.state),
+    steps: existsSync(traceFile) ? readJsonl(traceFile, 1000) : [],
+    summary: readJsonFile(summaryFile),
+    spans: existsSync(spansFile) ? readJsonl(spansFile, 300) : [],
+    events: existsSync(eventsFile) ? readJsonl(eventsFile, 100) : [],
+    metrics: readJsonFile(metricsFile),
+    riskDecisions: readJsonFile(riskDecisionsFile),
+    agentState: readJsonFile(agentStateFile),
+  }
+}
+
+function projectMemory(record: Readonly<MemoryLifecycleRecord>) {
+  return {
+    schemaVersion: 'public-memory/v1',
+    memoryId: record.entryId,
+    revision: record.revision,
+    state: record.state,
+    content: record.content,
+    scope: record.scope,
+    trust: record.trust,
+    sensitivity: record.sensitivity,
+    confidence: record.confidence,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    ...(record.expiresAt ? { expiresAt: record.expiresAt } : {}),
+  }
+}
+
+function scoped(ownerScope?: OwnerScope): { ownerScope: OwnerScope } | undefined {
+  return ownerScope ? { ownerScope } : undefined
+}
+
+function plainRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new HttpError(400, `${label} must be an object`)
+  }
+  return value as Record<string, unknown>
+}
+
+function parseLaunchOptions(
+  body: Record<string, unknown>,
+  allowPrivateNetwork = false,
+): LegacyLaunchOptions {
   const mode = parseWebBuddyMode(body.mode)
-  const startUrl = normalizeRequiredUrl(body.startUrl)
+  const startUrl = normalizeRequiredUrl(body.startUrl, allowPrivateNetwork)
   if (!mode) throw new HttpError(400, 'valid mode is required')
   if (!startUrl) throw new HttpError(400, 'valid startUrl is required')
   return {
@@ -671,59 +1242,6 @@ function launchOptionsFromRecord(record: RunRecord): LegacyLaunchOptions {
   }
 }
 
-function tracePayload(run: RunRecord) {
-  const dir = join(outputDir(), run.runId)
-  const traceFile = join(dir, 'trace.jsonl')
-  const summaryFile = join(dir, 'summary.json')
-  const traceDir = join(outputDir(), 'traces', `run_${run.runId}`)
-  const spansFile = join(traceDir, 'spans.jsonl')
-  const eventsFile = join(traceDir, 'events.jsonl')
-  const metricsFile = join(traceDir, 'metrics.json')
-  const agentStateFile = join(traceDir, 'agent-state.json')
-  const riskDecisionsFile = join(traceDir, 'artifacts', RISK_DECISIONS_ARTIFACT)
-  return {
-    id: run.runId,
-    runtime: 'web-buddy',
-    mode: run.inputSnapshot.goal.metadata?.mode,
-    state: run.state,
-    done: TERMINAL_STATES.has(run.state),
-    runRevision: run.runRevision,
-    attempt: run.attempt,
-    runDir: existsSync(dir) ? dir : undefined,
-    traceDir: existsSync(traceDir) ? traceDir : undefined,
-    steps: existsSync(traceFile) ? readJsonl(traceFile, 1000) : [],
-    summary: readJsonFile(summaryFile),
-    spans: existsSync(spansFile) ? readJsonl(spansFile, 300) : [],
-    events: existsSync(eventsFile) ? readJsonl(eventsFile, 100) : [],
-    metrics: readJsonFile(metricsFile),
-    riskDecisions: readJsonFile(riskDecisionsFile),
-    agentState: readJsonFile(agentStateFile),
-    resources: run.resourceRefs,
-  }
-}
-
-function discoverTraceArtifacts(runId: string) {
-  const traceDir = join(outputDir(), 'traces', `run_${runId}`)
-  return [
-    ['risk_decisions', join(traceDir, 'artifacts', RISK_DECISIONS_ARTIFACT)],
-    ['metrics', join(traceDir, 'metrics.json')],
-    ['summary', join(outputDir(), runId, 'summary.json')],
-  ].filter(([, file]) => existsSync(file)).map(([kind, file]) => ({ kind, locator: file }))
-}
-
-function allowStartUrl(config: AgentConfig, startUrl?: string): void {
-  if (!startUrl) return
-  try {
-    const host = new URL(startUrl).hostname.toLowerCase()
-    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') config.browser.blockLocalhost = false
-    if (host && !config.browser.allowedDomains.includes(host)) {
-      config.browser.allowedDomains = [...config.browser.allowedDomains, host]
-    }
-  } catch {
-    // Runtime reports invalid URLs.
-  }
-}
-
 function parseTaskType(value: unknown): WebBuddyTaskType | undefined {
   return value === 'explore' || value === 'apply_entry' || value === 'fill_form' || value === 'final_review'
     ? value
@@ -737,9 +1255,38 @@ function parseWebBuddyMode(value: unknown): AgentRunResult['mode'] | undefined {
     : undefined
 }
 
-function normalizeRequiredUrl(value: unknown): string | undefined {
+function normalizeRequiredUrl(
+  value: unknown,
+  allowPrivateNetwork = false,
+): string | undefined {
   if (typeof value !== 'string' || !value.trim()) return undefined
-  try { return new URL(value.trim()).toString() } catch { return undefined }
+  try {
+    const url = new URL(value.trim())
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined
+    if (!allowPrivateNetwork && isPrivateNetworkHost(url.hostname)) return undefined
+    return url.toString()
+  } catch {
+    return undefined
+  }
+}
+
+function isPrivateNetworkHost(value: string): boolean {
+  const host = value.toLowerCase().replace(/^\[|\]$/g, '')
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true
+  if (host === '::1' || host === '::' || host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe8')) {
+    return true
+  }
+  const octets = host.split('.').map(Number)
+  if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return false
+  }
+  const [first, second] = octets
+  return first === 0
+    || first === 10
+    || first === 127
+    || (first === 169 && second === 254)
+    || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && second === 168)
 }
 
 function isHumanBlocked(state: AgentRunResult['finalState']): boolean {
@@ -759,10 +1306,25 @@ function requestIdempotencyKey(req: IncomingMessage, body: Record<string, unknow
   return header?.trim() || (typeof body.idempotencyKey === 'string' && body.idempotencyKey.trim()) || fallback
 }
 
-function resumeExtension(req: IncomingMessage): '.pdf' | '.json' | '.txt' {
-  const header = Array.isArray(req.headers['x-file-name']) ? req.headers['x-file-name'][0] : req.headers['x-file-name']
-  const ext = extname(header || '').toLowerCase()
-  return ext === '.json' || ext === '.txt' || ext === '.pdf' ? ext : '.pdf'
+function requireIdempotencyKey(req: IncomingMessage, body: Record<string, unknown>): string {
+  const value = requestIdempotencyKey(req, body, '')
+  if (!value) throw new HttpError(400, 'idempotencyKey is required')
+  return value
+}
+
+function requireExpectedRevision(body: Record<string, unknown>): number {
+  if (!Number.isSafeInteger(body.expectedRevision) || Number(body.expectedRevision) < 0) {
+    throw new HttpError(400, 'expectedRevision must be a non-negative safe integer')
+  }
+  return Number(body.expectedRevision)
+}
+
+function requestIdentifier(req: IncomingMessage): string {
+  const header = Array.isArray(req.headers['x-request-id'])
+    ? req.headers['x-request-id'][0]
+    : req.headers['x-request-id']
+  const value = header?.trim() || randomUUID()
+  return `request:${createHash('sha256').update(value).digest('hex')}`
 }
 
 function send(res: ServerResponse, status: number, body: unknown): void {
@@ -774,18 +1336,27 @@ function send(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body))
 }
 
-function sendControlError(res: ServerResponse, error: unknown): void {
-  if (error instanceof HttpError) return send(res, error.status, { error: error.message })
+function sendControlError(
+  res: ServerResponse,
+  error: unknown,
+  security: WebServiceSecurityBoundary,
+): void {
+  const sanitized = (value: unknown) => security.sanitize(value)
+  if (error instanceof HttpError) return send(res, error.status, sanitized({ error: error.message }))
   if (error instanceof RunServiceError) {
-    return send(res, error.code === 'RUN_NOT_FOUND' ? 404 : 409, { error: error.code, message: error.message })
+    return send(
+      res,
+      error.code === 'RUN_NOT_FOUND' ? 404 : 409,
+      sanitized({ error: error.code, message: error.message }),
+    )
   }
   if (error instanceof ControlStoreError) {
     const status = error.code.endsWith('_NOT_FOUND') ? 404
       : error.code === 'INVALID_RECORD' ? 400
         : 409
-    return send(res, status, { error: error.code, message: error.message })
+    return send(res, status, sanitized({ error: error.code, message: error.message }))
   }
-  send(res, 500, { error: error instanceof Error ? error.message : String(error) })
+  send(res, 500, sanitized({ error: error instanceof Error ? error.message : String(error) }))
 }
 
 class HttpError extends Error {
@@ -794,12 +1365,36 @@ class HttpError extends Error {
   }
 }
 
-function readBody(req: IncomingMessage): Promise<Buffer> {
+function readBody(req: IncomingMessage, maxBytes = 1024 * 1024): Promise<Buffer> {
   return new Promise((resolveBody, reject) => {
     const chunks: Buffer[] = []
-    req.on('data', (chunk) => chunks.push(chunk))
-    req.on('end', () => resolveBody(Buffer.concat(chunks)))
-    req.on('error', reject)
+    let size = 0
+    let settled = false
+    const onData = (chunk: Buffer) => {
+      if (settled) return
+      size += chunk.length
+      if (size > maxBytes) {
+        settled = true
+        req.off('data', onData)
+        req.off('end', onEnd)
+        req.resume()
+        reject(new HttpError(413, 'request body exceeds the 1 MiB service limit'))
+        return
+      }
+      chunks.push(chunk)
+    }
+    const onEnd = () => {
+      if (settled) return
+      settled = true
+      resolveBody(Buffer.concat(chunks))
+    }
+    req.on('data', onData)
+    req.on('end', onEnd)
+    req.on('error', (error) => {
+      if (settled) return
+      settled = true
+      reject(error)
+    })
   })
 }
 

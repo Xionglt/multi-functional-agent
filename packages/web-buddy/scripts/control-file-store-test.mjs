@@ -157,6 +157,15 @@ async function runApprovalMatrix() {
 
   const winningCommand = winner.value.event.idempotencyKey === commandA.idempotencyKey ? commandA : commandB
   assert.equal((await store.resolveOnce(winningCommand)).replayed, true, 'identical resolve replay is idempotent')
+  assert.equal((await store.resolveOnce({
+    ...winningCommand,
+    resolvedAt: '2026-07-17T03:03:00.000Z',
+    resolution: {
+      ...winningCommand.resolution,
+      issuedAt: '2026-07-17T03:03:00.000Z',
+      nonce: 'retry-transport-nonce',
+    },
+  })).replayed, true, 'transport retry metadata does not break semantic approval idempotency')
   const restarted = new FileApprovalStore({ rootDir: root })
   assert.equal((await restarted.get(create.record.approvalId, { ownerScope }))?.status, 'approved')
   assert.deepEqual((await restarted.readEvents(create.record.approvalId, { ownerScope })).items.map((event) => event.eventSequence), [0, 1])

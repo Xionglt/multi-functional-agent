@@ -124,7 +124,8 @@ try {
   await runServiceA.requestCancel(cancellingRunId, 'request-cancel-c4')
 
   // Simulate a fresh process by constructing entirely new Store/Service instances.
-  const runServiceB = new RunService(new FileRunStore({ rootDir: controlRoot }))
+  const fileRunStoreB = new FileRunStore({ rootDir: controlRoot })
+  const runServiceB = new RunService(fileRunStoreB)
   const approvalServiceB = new ApprovalService(new FileApprovalStore({ rootDir: controlRoot }))
   const recovery = new RecoveryService(runServiceB, approvalServiceB, {
     canRestoreSession: async (record) => Boolean(record.sessionRef && await sessions.get(record.sessionRef.id)),
@@ -150,6 +151,34 @@ try {
     safeEvents.some((event) => event.data?.replayedAction === true),
     false,
     'startup classification never reports or performs a replay',
+  )
+
+  const tenantOwnerScope = {
+    schemaVersion: 'owner-scope/v1',
+    tenantId: 'recovery-tenant',
+    userId: 'recovery-user',
+  }
+  const tenantRunId = 'recovery-tenant-running'
+  await runServiceB.create(
+    snapshot(tenantRunId, false, undefined, tenantOwnerScope),
+    { idempotencyKey: 'create-tenant-recovery-c4' },
+  )
+  await runServiceB.start(
+    tenantRunId,
+    'start-tenant-recovery-c4',
+    { ownerScope: tenantOwnerScope },
+  )
+  assert.equal(
+    (await recovery.recoverStartupRuns()).length,
+    0,
+    'unscoped recovery is not a wildcard over tenant runs',
+  )
+  assert.deepEqual(await fileRunStoreB.listOwnerScopes(), [tenantOwnerScope])
+  const tenantDecisions = await recovery.recoverStartupRuns({ ownerScope: tenantOwnerScope })
+  assert.equal(tenantDecisions.length, 1)
+  assert.equal(
+    (await runServiceB.get(tenantRunId, { ownerScope: tenantOwnerScope }))?.state,
+    'failed',
   )
 
   const restored = await restoreSessionState({ store: sessions, sessionId: oldSession.sessionId })
@@ -209,6 +238,16 @@ try {
     attempt: 1,
   }), { idempotencyKey: 'create-child-c4' })
   await runServiceB.start(childRunId, 'start-child-c4')
+  const tenantChildRunId = 'recovery-child-process-tenant'
+  await runServiceB.create(
+    snapshot(tenantChildRunId, false, undefined, tenantOwnerScope),
+    { idempotencyKey: 'create-child-tenant-c4' },
+  )
+  await runServiceB.start(
+    tenantChildRunId,
+    'start-child-tenant-c4',
+    { ownerScope: tenantOwnerScope },
+  )
   const port = await availablePort()
   await bootAndStopServer({
     PORT: String(port),
@@ -221,13 +260,18 @@ try {
     'recoverable',
     'real server bootstrap classifies an abandoned running record from the prior process',
   )
+  assert.equal(
+    (await runServiceC.get(tenantChildRunId, { ownerScope: tenantOwnerScope }))?.state,
+    'failed',
+    'real server bootstrap classifies abandoned tenant runs within their exact scope',
+  )
 
   console.log('control recovery tests passed')
 } finally {
   await rm(rootDir, { recursive: true, force: true })
 }
 
-function snapshot(runId, restartSafe, sessionRef) {
+function snapshot(runId, restartSafe, sessionRef, ownerScope) {
   return snapshotWebTaskInput({
     schemaVersion: 'web-task-input/v1',
     runId,
@@ -238,6 +282,7 @@ function snapshot(runId, restartSafe, sessionRef) {
     },
     startUrl: 'https://fixture.example/',
     ...(sessionRef ? { sessionRef } : {}),
+    ...(ownerScope ? { ownerScope } : {}),
     contract: {
       schemaVersion: 'web-task-contract/v1',
       contractId: 'recovery-c4',

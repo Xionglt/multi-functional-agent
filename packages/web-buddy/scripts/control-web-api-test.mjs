@@ -6,7 +6,33 @@ import { tmpdir } from 'node:os'
 import { createWebControlServer } from '../dist/web/server.js'
 
 const rootDir = await mkdtemp(join(tmpdir(), 'web-buddy-control-api-'))
-const control = createWebControlServer({ controlStoreDir: rootDir, disableExecution: true })
+const token = 'control-web-api-test-token'
+const scope = {
+  schemaVersion: 'service-scope/v1',
+  kind: 'tenant',
+  tenantId: 'control-api-tenant',
+  userId: 'control-api-user',
+}
+const ownerScope = {
+  schemaVersion: 'owner-scope/v1',
+  tenantId: scope.tenantId,
+  userId: scope.userId,
+}
+const control = createWebControlServer({
+  controlStoreDir: rootDir,
+  disableExecution: true,
+  serviceSecurity: {
+    schemaVersion: 'web-service-security/v1',
+    authenticate: ({ authorization }) => authorization === `Bearer ${token}`
+      ? {
+          schemaVersion: 'service-principal/v1',
+          actorId: 'control-api-actor',
+          authentication: 'bearer',
+          scope,
+        }
+      : undefined,
+  },
+})
 try {
   await new Promise((resolve, reject) => {
     control.server.once('error', reject)
@@ -57,23 +83,33 @@ try {
   assert.equal(Array.isArray(listed), false, 'run list has a forward-compatible page envelope')
 
   const detail = await json(base, `/api/runs/${encodeURIComponent(created.runId)}`)
-  assert.equal(detail.run.inputSnapshot.schemaVersion, 'web-task-input-snapshot/v1')
-  assert.equal(detail.events[0].eventType, 'run_created')
+  assert.equal(detail.schemaVersion, 'public-run/v1')
+  assert.equal(detail.runId, created.runId)
+  const events = await json(base, `/api/runs/${encodeURIComponent(created.runId)}/events`)
+  assert.equal(events.items[0].type, 'run_created')
 
-  await control.runService.start(created.runId, 'api-start-c3')
-  const pausedRequest = await json(base, `/api/runs/${encodeURIComponent(created.runId)}/pause`, { method: 'POST' })
-  assert.equal(pausedRequest.run.state, 'pausing')
-  const resumedWithoutCheckpoint = await request(base, `/api/runs/${encodeURIComponent(created.runId)}/resume`, { method: 'POST' })
+  await control.runService.start(created.runId, 'api-start-c3', { ownerScope })
+  const pausedRequest = await json(base, `/api/runs/${encodeURIComponent(created.runId)}/pause`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'idempotency-key': 'api-pause-c3' },
+    body: JSON.stringify({ expectedRevision: created.revision }),
+  })
+  assert.equal(pausedRequest.state, 'pausing')
+  const resumedWithoutCheckpoint = await request(base, `/api/runs/${encodeURIComponent(created.runId)}/resume`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'idempotency-key': 'api-resume-c3' },
+    body: JSON.stringify({ expectedRevision: created.revision }),
+  })
   assert.equal(resumedWithoutCheckpoint.status, 409)
   assert.equal((await resumedWithoutCheckpoint.json()).error, 'resume_requires_safe_session')
 
   const trace = await json(base, `/api/runs/${encodeURIComponent(created.runId)}/trace`)
-  assert.equal(trace.id, created.runId)
+  assert.equal(trace.runId, created.runId)
   assert.equal(trace.state, 'pausing')
-  assert.equal(Array.isArray(trace.resources), true)
+  assert.equal('resources' in trace, false)
   const artifacts = await json(base, `/api/runs/${encodeURIComponent(created.runId)}/artifacts`)
   assert.equal(artifacts.runId, created.runId)
-  assert.equal(Array.isArray(artifacts.discovered), true)
+  assert.equal(Array.isArray(artifacts.items), true)
 
   const cancelCreateResponse = await request(base, '/api/run', {
     method: 'POST',
@@ -86,10 +122,15 @@ try {
   })
   assert.equal(cancelCreateResponse.status, 201, 'legacy create route delegates to durable service')
   const cancelCreated = await cancelCreateResponse.json()
-  const cancelled = await json(base, `/api/runs/${encodeURIComponent(cancelCreated.runId)}/cancel`, { method: 'POST' })
-  assert.equal(cancelled.run.state, 'cancelled')
-  const cancelledAgain = await json(base, `/api/runs/${encodeURIComponent(cancelCreated.runId)}/cancel`, { method: 'POST' })
-  assert.equal(cancelledAgain.run.state, 'cancelled', 'cancel endpoint is idempotent')
+  const cancelRequest = {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'idempotency-key': 'api-cancel-c3' },
+    body: JSON.stringify({ expectedRevision: cancelCreated.revision }),
+  }
+  const cancelled = await json(base, `/api/runs/${encodeURIComponent(cancelCreated.runId)}/cancel`, cancelRequest)
+  assert.equal(cancelled.state, 'cancelled')
+  const cancelledAgain = await json(base, `/api/runs/${encodeURIComponent(cancelCreated.runId)}/cancel`, cancelRequest)
+  assert.equal(cancelledAgain.state, 'cancelled', 'cancel endpoint is idempotent')
 
   const actionBinding = {
     schemaVersion: 'action-binding/v1',
@@ -114,6 +155,7 @@ try {
     runRevision: 0,
     attempt: 1,
     status: 'pending',
+    ownerScope,
     actionBinding,
     allowedDecisions: ['approved', 'denied'],
     requestedAt,
@@ -122,17 +164,24 @@ try {
 
   const inbox = await json(base, '/api/approvals')
   assert.equal(inbox.items.length, 1)
-  assert.equal(inbox.items[0].actionBinding.destinationOrigin, 'https://example.test')
-  const resolved = await json(base, `/api/approvals/${approvalId}/resolve`, {
+  assert.equal(inbox.items[0].action.destinationOrigin, 'https://example.test')
+  const resolveRequest = {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'idempotency-key': 'resolve-api-c3' },
-    body: JSON.stringify({ decision: 'denied', expectedRecordRevision: 0 }),
-  })
-  assert.equal(resolved.approval.status, 'denied')
+    body: JSON.stringify({ decision: 'denied', expectedRevision: 0 }),
+  }
+  const resolved = await json(base, `/api/approvals/${approvalId}/resolve`, resolveRequest)
+  assert.equal(resolved.status, 'denied')
+  const replayedResolution = await json(
+    base,
+    `/api/approvals/${approvalId}/resolve`,
+    resolveRequest,
+  )
+  assert.equal(replayedResolution.status, 'denied', 'approval resolve retry is idempotent')
   const reused = await request(base, `/api/approvals/${approvalId}/resolve`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ decision: 'approved', expectedRecordRevision: 1 }),
+    headers: { 'content-type': 'application/json', 'idempotency-key': 'resolve-api-c3-second' },
+    body: JSON.stringify({ decision: 'approved', expectedRevision: 0, expectedRecordRevision: 1 }),
   })
   assert.equal(reused.status, 409, 'resolved approval cannot cross a second action')
 
@@ -148,7 +197,9 @@ try {
 }
 
 function request(base, path, options) {
-  return fetch(`${base}${path}`, options)
+  const headers = new Headers(options?.headers)
+  headers.set('authorization', `Bearer ${token}`)
+  return fetch(`${base}${path}`, { ...options, headers })
 }
 
 async function json(base, path, options) {

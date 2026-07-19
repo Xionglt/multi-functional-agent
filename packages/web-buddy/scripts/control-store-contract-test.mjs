@@ -317,12 +317,29 @@ const exactExpectation = {
 }
 validateApprovalResolve(approval, {
   approvalId,
+  ownerScope,
   expectedRecordRevision: 0,
   idempotencyKey: 'resolve-approval-control-c1',
   expectation: exactExpectation,
   resolution,
   resolvedAt: '2026-07-17T01:01:00.000Z',
 })
+assertStoreError(
+  () => validateApprovalResolve(approval, {
+    approvalId,
+    ownerScope: {
+      schemaVersion: 'owner-scope/v1',
+      tenantId: 'other-tenant',
+      userId: 'other-user',
+    },
+    expectedRecordRevision: 0,
+    idempotencyKey: 'wrong-owner-scope',
+    expectation: exactExpectation,
+    resolution,
+    resolvedAt: '2026-07-17T01:01:00.000Z',
+  }),
+  'BINDING_MISMATCH',
+)
 
 for (const expectation of [
   { ...exactExpectation, runId: 'wrong-run' },
@@ -333,6 +350,7 @@ for (const expectation of [
   assertStoreError(
     () => validateApprovalResolve(approval, {
       approvalId,
+      ownerScope,
       expectedRecordRevision: 0,
       idempotencyKey: 'wrong-binding',
       expectation,
@@ -415,6 +433,7 @@ for (const mutatedRecord of [
 assertStoreError(
   () => validateApprovalResolve(resolvedApproval, {
     approvalId,
+    ownerScope,
     expectedRecordRevision: 1,
     idempotencyKey: 'second-resolve',
     expectation: exactExpectation,
@@ -435,6 +454,7 @@ assertStoreError(
 assertStoreError(
   () => validateApprovalResolve(approval, {
     approvalId,
+    ownerScope,
     expectedRecordRevision: 0,
     idempotencyKey: 'invalid-resolution',
     expectation: exactExpectation,

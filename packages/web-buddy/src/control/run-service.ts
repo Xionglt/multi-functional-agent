@@ -22,6 +22,7 @@ import {
   type OpaqueResourceRef,
   type RunListQuery,
   type RunRecord,
+  type RunEventQuery,
   type RunStore,
   type RunStoreEvent,
   type SafeTurnBoundaryRef,
@@ -127,8 +128,8 @@ export class RunService {
     return this.store.list(query)
   }
 
-  events(runId: string, scope?: ScopedStoreQuery) {
-    return this.store.readEvents(runId, scope)
+  events(runId: string, query?: RunEventQuery) {
+    return this.store.readEvents(runId, query)
   }
 
   async transition(runId: string, input: TransitionRunInput, scope?: ScopedStoreQuery): Promise<RunRecord> {

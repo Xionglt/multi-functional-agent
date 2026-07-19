@@ -145,6 +145,44 @@ export class FileRunStore implements RunStore {
     return page(filtered, query.limit, query.cursor)
   }
 
+  async listOwnerScopes(): Promise<OwnerScope[]> {
+    const scopesRoot = join(this.options.rootDir, 'scopes')
+    let scopeEntries
+    try {
+      scopeEntries = await readdir(scopesRoot, { withFileTypes: true })
+    } catch (error) {
+      if (isNotFound(error)) return []
+      throw error
+    }
+    const discovered = new Map<string, OwnerScope>()
+    for (const scopeEntry of scopeEntries) {
+      if (!scopeEntry.isDirectory() || !scopeEntry.name.startsWith('scope-')) continue
+      const runsDir = join(scopesRoot, scopeEntry.name, 'runs')
+      let runEntries
+      try {
+        runEntries = await readdir(runsDir, { withFileTypes: true })
+      } catch (error) {
+        if (isNotFound(error)) continue
+        throw error
+      }
+      for (const runEntry of runEntries) {
+        if (!runEntry.isDirectory()) continue
+        try {
+          const record = decodeRunRecord(JSON.parse(
+            await readFile(join(runsDir, runEntry.name, 'record.json'), 'utf8'),
+          ))
+          if (record.ownerScope) {
+            discovered.set(controlRecordDigest(record.ownerScope), record.ownerScope)
+            break
+          }
+        } catch {
+          // A corrupt entity is handled by its normal scoped recovery path.
+        }
+      }
+    }
+    return [...discovered.values()].map((scope) => structuredClone(scope))
+  }
+
   async transact(
     runId: string,
     mutation: RunStoreMutation,
@@ -273,7 +311,7 @@ export class FileApprovalStore implements ApprovalStore {
     )
     return withEntityLock(paths, async () => {
       await recoverEntity(paths, 'approval', command.approvalId, decodeApprovalRecord)
-      const requestDigest = controlRecordDigest(command)
+      const requestDigest = approvalResolutionRequestDigest(command)
       const replay = await replayFor<ApprovalRecord, ApprovalStoreEvent>(paths, command.idempotencyKey, requestDigest)
       if (replay) return replay
       const current = await readRecord(paths, decodeApprovalRecord)
@@ -355,6 +393,24 @@ export function fileControlStorePaths(
     wal: join(dir, 'transaction.wal.json'),
     lock: join(dir, 'writer.lock'),
   }
+}
+
+function approvalResolutionRequestDigest(command: ApprovalResolveCommand): string {
+  const {
+    resolvedAt: _resolvedAt,
+    resolution,
+    ...stableCommand
+  } = command
+  const {
+    issuedAt: _issuedAt,
+    nonce: _nonce,
+    consumedAt: _consumedAt,
+    ...stableResolution
+  } = resolution
+  return controlRecordDigest({
+    ...stableCommand,
+    resolution: stableResolution,
+  })
 }
 
 async function commitEntity<TRecord, TEvent>(

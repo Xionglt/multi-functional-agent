@@ -3292,7 +3292,9 @@ async function relevantMemoriesFor(input: AgentLoopInput): Promise<string | unde
 function originForUrl(url: string | undefined): string | undefined {
   if (!url) return undefined
   try {
-    return new URL(url).origin
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined
+    return parsed.origin === 'null' ? undefined : parsed.origin
   } catch {
     return undefined
   }

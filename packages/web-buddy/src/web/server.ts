@@ -231,160 +231,214 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     channels.delete(record.runId)
   }
 
+  async function persistPrelaunchFailure(
+    launched: RunRecord,
+    controller: AgentRunController | undefined,
+    adapter: 'recruiting' | 'web-task',
+    error: unknown,
+  ): Promise<string> {
+    const safeMessage = String(security.sanitize(
+      error instanceof Error ? error.message : String(error),
+    ))
+    controller?.abort('Run launch failed before runtime execution.')
+    const active = executions.get(launched.runId)
+    if (active
+      && active.runRevision === launched.runRevision
+      && active.attempt === launched.attempt) {
+      executions.delete(launched.runId)
+    }
+    const scope = scoped(launched.ownerScope)
+    const current = await runService.get(launched.runId, scope)
+    if (!current
+      || current.runRevision !== launched.runRevision
+      || current.attempt !== launched.attempt
+      || !['queued', 'running', 'resuming'].includes(current.state)) {
+      return safeMessage
+    }
+    const failed = await runService.transition(launched.runId, {
+      to: 'failed',
+      reason: safeMessage,
+      idempotencyKey: `launch-failed:${adapter}:${launched.runRevision}:${launched.attempt}`,
+      expectedRunRevision: launched.runRevision,
+      expectedAttempt: launched.attempt,
+      data: { phase: 'prelaunch', adapter },
+      update: () => ({ pendingApprovalIds: [] }),
+    }, scope)
+    if (adapter === 'web-task') endWebTaskRun(failed, undefined, safeMessage)
+    else endRun(failed, undefined, safeMessage)
+    return safeMessage
+  }
+
   async function launch(record: RunRecord, launchOptions = launchOptionsFromRecord(record)): Promise<void> {
     if (options.disableExecution) return
-    if (executionAdapterFor(record) !== 'recruiting_compat') {
-      throw new HttpError(409, 'Stored run is not bound to the recruiting compatibility adapter.')
-    }
-    const scope = scoped(record.ownerScope)
-    const controller = createAgentRunController()
-    const running = await runService.transition(record.runId, {
-      to: 'running',
-      idempotencyKey: `launch:${record.runRevision}:${record.attempt}`,
-      expectedRunRevision: record.runRevision,
-      expectedAttempt: record.attempt,
-    }, scope)
-    const sessionId = launchOptions.restoredSessionId ?? `control-${running.runId}-a${running.attempt}`
-    const gate = new DurableHumanGate({
-      runs: runService,
-      approvals: approvalService,
-      runId: running.runId,
-      runRevision: running.runRevision,
-      attempt: running.attempt,
-      taskContract: running.inputSnapshot.contract,
-      sessionId,
-      abortSignal: controller.signal,
-      ...(running.ownerScope ? { ownerScope: running.ownerScope } : {}),
-    })
-    executions.set(record.runId, {
-      controller,
-      gate,
-      runRevision: running.runRevision,
-      attempt: running.attempt,
-    })
-
-    const config = await runtimeConfig()
-    config.human.mode = 'auto'
-    if (launchOptions.headless !== undefined) {
-      config.browser.headless = launchOptions.headless
-      config.browser.visualHighlight = !launchOptions.headless
-    }
-    if (launchOptions.resumePath) config.resumePath = launchOptions.resumePath
-
-    const runtimeOptions: RunOptions = {
-      config,
-      mode: launchOptions.mode,
-      startUrl: launchOptions.startUrl,
-      taskPrompt: launchOptions.taskPrompt,
-      taskType: launchOptions.taskType,
-      requiresCurrentResumeUpload: launchOptions.requiresCurrentResumeUpload,
-      runId: running.runId,
-      source: 'web-ui',
-      profile: 'debug',
-      controller,
-      gate,
-      sessionId,
-      persistenceSanitizer: (value) => security.sanitize(value),
-      ...(launchOptions.restoredSessionId ? { restoredSessionId: launchOptions.restoredSessionId } : {}),
-      onSessionReady: async (session) => {
-        await runService.attachSession(running.runId, {
-          schemaVersion: 'session-ref/v1',
-          provider: 'file-session-store',
-          id: session.sessionId,
-          runId: running.runId,
-          attempt: running.attempt,
-        }, `session:${running.runRevision}:${running.attempt}:${session.sessionId}`, scope)
-      },
-      onEvent: (event) => emitRun(running.runId, event),
-    }
-
-    const settled = runJobApplicationAgent(runtimeOptions)
-      .then((result) => settleExecution(running, controller, result))
-      .catch((error) => settleExecution(running, controller, undefined, String(error)))
-      .finally(() => {
-        const active = executions.get(running.runId)
-        if (active?.runRevision === running.runRevision && active.attempt === running.attempt) {
-          executions.delete(running.runId)
-        }
+    let controller: AgentRunController | undefined
+    let launched = record
+    try {
+      if (executionAdapterFor(record) !== 'recruiting_compat') {
+        throw new HttpError(409, 'Stored run is not bound to the recruiting compatibility adapter.')
+      }
+      const scope = scoped(record.ownerScope)
+      controller = createAgentRunController()
+      const running = await runService.transition(record.runId, {
+        to: 'running',
+        idempotencyKey: `launch:${record.runRevision}:${record.attempt}`,
+        expectedRunRevision: record.runRevision,
+        expectedAttempt: record.attempt,
+      }, scope)
+      launched = running
+      const sessionId = launchOptions.restoredSessionId ?? `control-${running.runId}-a${running.attempt}`
+      const gate = new DurableHumanGate({
+        runs: runService,
+        approvals: approvalService,
+        runId: running.runId,
+        runRevision: running.runRevision,
+        attempt: running.attempt,
+        taskContract: running.inputSnapshot.contract,
+        sessionId,
+        abortSignal: controller.signal,
+        ...(running.ownerScope ? { ownerScope: running.ownerScope } : {}),
       })
-    const active = executions.get(running.runId)
-    if (active) active.settled = settled
-    void settled
+      executions.set(record.runId, {
+        controller,
+        gate,
+        runRevision: running.runRevision,
+        attempt: running.attempt,
+      })
+
+      const config = await runtimeConfig()
+      config.human.mode = 'auto'
+      if (launchOptions.headless !== undefined) {
+        config.browser.headless = launchOptions.headless
+        config.browser.visualHighlight = !launchOptions.headless
+      }
+      if (launchOptions.resumePath) config.resumePath = launchOptions.resumePath
+
+      const runtimeOptions: RunOptions = {
+        config,
+        mode: launchOptions.mode,
+        startUrl: launchOptions.startUrl,
+        taskPrompt: launchOptions.taskPrompt,
+        taskType: launchOptions.taskType,
+        requiresCurrentResumeUpload: launchOptions.requiresCurrentResumeUpload,
+        runId: running.runId,
+        source: 'web-ui',
+        profile: 'debug',
+        controller,
+        gate,
+        sessionId,
+        persistenceSanitizer: (value) => security.sanitize(value),
+        ...(launchOptions.restoredSessionId ? { restoredSessionId: launchOptions.restoredSessionId } : {}),
+        onSessionReady: async (session) => {
+          await runService.attachSession(running.runId, {
+            schemaVersion: 'session-ref/v1',
+            provider: 'file-session-store',
+            id: session.sessionId,
+            runId: running.runId,
+            attempt: running.attempt,
+          }, `session:${running.runRevision}:${running.attempt}:${session.sessionId}`, scope)
+        },
+        onEvent: (event) => emitRun(running.runId, event),
+      }
+
+      const settled = runJobApplicationAgent(runtimeOptions)
+        .then((result) => settleExecution(running, controller!, result))
+        .catch((error) => settleExecution(running, controller!, undefined, String(error)))
+        .finally(() => {
+          const active = executions.get(running.runId)
+          if (active?.runRevision === running.runRevision && active.attempt === running.attempt) {
+            executions.delete(running.runId)
+          }
+        })
+      const active = executions.get(running.runId)
+      if (active) active.settled = settled
+      void settled
+    } catch (error) {
+      const safeMessage = await persistPrelaunchFailure(launched, controller, 'recruiting', error)
+      throw new Error(safeMessage)
+    }
   }
 
   async function launchWebTask(record: RunRecord): Promise<void> {
     if (options.disableExecution) return
-    if (executionAdapterFor(record) !== 'generic_web_task') {
-      throw new HttpError(409, 'Stored run is not bound to the generic WebTask adapter.')
+    let controller: AgentRunController | undefined
+    let launched = record
+    try {
+      if (executionAdapterFor(record) !== 'generic_web_task') {
+        throw new HttpError(409, 'Stored run is not bound to the generic WebTask adapter.')
+      }
+      assertStoredInputDigest(record)
+      const scope = scoped(record.ownerScope)
+      controller = createAgentRunController()
+      const running = await runService.transition(record.runId, {
+        to: 'running',
+        idempotencyKey: `launch-web-task:${record.runRevision}:${record.attempt}`,
+        expectedRunRevision: record.runRevision,
+        expectedAttempt: record.attempt,
+      }, scope)
+      launched = running
+      const sessionId = `control-${running.runId}-a${running.attempt}`
+      const gate = new DurableHumanGate({
+        runs: runService,
+        approvals: approvalService,
+        runId: running.runId,
+        runRevision: running.runRevision,
+        attempt: running.attempt,
+        taskContract: running.inputSnapshot.contract,
+        sessionId,
+        abortSignal: controller.signal,
+        ...(running.ownerScope ? { ownerScope: running.ownerScope } : {}),
+      })
+      executions.set(running.runId, {
+        controller,
+        gate,
+        runRevision: running.runRevision,
+        attempt: running.attempt,
+      })
+      const config = await runtimeConfig()
+      config.human.mode = 'auto'
+      const driver = options.webTaskRuntimeDriver ?? createWebTaskRuntimeDriver({
+        config,
+        gate,
+        controller,
+        sessionId,
+        durableSession: true,
+        persistenceSanitizer: (value) => security.sanitize(value),
+        onSessionReady: async (session) => {
+          await runService.attachSession(running.runId, {
+            schemaVersion: 'session-ref/v1',
+            provider: 'file-session-store',
+            id: session.sessionId,
+            runId: running.runId,
+            attempt: running.attempt,
+          }, `web-task-session:${running.runRevision}:${running.attempt}:${session.sessionId}`, scope)
+        },
+      })
+      const input = webTaskInputFromRecord(running, driver, (event) => {
+        emitRun(running.runId, {
+          phase: event.type,
+          level: event.type === 'run_failed' ? 'error'
+            : event.type === 'run_completed' ? 'done'
+              : event.type === 'run_blocked' ? 'gate'
+                : 'info',
+          message: event.snapshot?.reason ?? event.type,
+        })
+      })
+      const settled = runWebTask(input)
+        .then((result) => settleWebTaskExecution(running, controller!, result))
+        .catch((error) => settleWebTaskExecution(running, controller!, undefined, String(error)))
+        .finally(() => {
+          const active = executions.get(running.runId)
+          if (active?.runRevision === running.runRevision && active.attempt === running.attempt) {
+            executions.delete(running.runId)
+          }
+        })
+      const active = executions.get(running.runId)
+      if (active) active.settled = settled
+      void settled
+    } catch (error) {
+      const safeMessage = await persistPrelaunchFailure(launched, controller, 'web-task', error)
+      throw new Error(safeMessage)
     }
-    assertStoredInputDigest(record)
-    const scope = scoped(record.ownerScope)
-    const controller = createAgentRunController()
-    const running = await runService.transition(record.runId, {
-      to: 'running',
-      idempotencyKey: `launch-web-task:${record.runRevision}:${record.attempt}`,
-      expectedRunRevision: record.runRevision,
-      expectedAttempt: record.attempt,
-    }, scope)
-    const sessionId = `control-${running.runId}-a${running.attempt}`
-    const gate = new DurableHumanGate({
-      runs: runService,
-      approvals: approvalService,
-      runId: running.runId,
-      runRevision: running.runRevision,
-      attempt: running.attempt,
-      taskContract: running.inputSnapshot.contract,
-      sessionId,
-      abortSignal: controller.signal,
-      ...(running.ownerScope ? { ownerScope: running.ownerScope } : {}),
-    })
-    executions.set(running.runId, {
-      controller,
-      gate,
-      runRevision: running.runRevision,
-      attempt: running.attempt,
-    })
-    const config = await runtimeConfig()
-    config.human.mode = 'auto'
-    const driver = options.webTaskRuntimeDriver ?? createWebTaskRuntimeDriver({
-      config,
-      gate,
-      controller,
-      sessionId,
-      durableSession: true,
-      persistenceSanitizer: (value) => security.sanitize(value),
-      onSessionReady: async (session) => {
-        await runService.attachSession(running.runId, {
-          schemaVersion: 'session-ref/v1',
-          provider: 'file-session-store',
-          id: session.sessionId,
-          runId: running.runId,
-          attempt: running.attempt,
-        }, `web-task-session:${running.runRevision}:${running.attempt}:${session.sessionId}`, scope)
-      },
-    })
-    const input = webTaskInputFromRecord(running, driver, (event) => {
-      emitRun(running.runId, {
-        phase: event.type,
-        level: event.type === 'run_failed' ? 'error'
-          : event.type === 'run_completed' ? 'done'
-            : event.type === 'run_blocked' ? 'gate'
-              : 'info',
-        message: event.snapshot?.reason ?? event.type,
-      })
-    })
-    const settled = runWebTask(input)
-      .then((result) => settleWebTaskExecution(running, controller, result))
-      .catch((error) => settleWebTaskExecution(running, controller, undefined, String(error)))
-      .finally(() => {
-        const active = executions.get(running.runId)
-        if (active?.runRevision === running.runRevision && active.attempt === running.attempt) {
-          executions.delete(running.runId)
-        }
-      })
-    const active = executions.get(running.runId)
-    if (active) active.settled = settled
-    void settled
   }
 
   async function settleExecution(

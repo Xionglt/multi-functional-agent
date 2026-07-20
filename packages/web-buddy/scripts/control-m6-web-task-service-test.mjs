@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { emptyRunMetrics } from '../dist/metrics/schema.js'
@@ -211,12 +211,104 @@ try {
   assert.equal(afterRestart.items.length, 1, 'ArtifactRef did not survive control-plane restart')
   assert.equal(afterRestart.items[0].id, 'm6-comparison-artifact')
 
+  await prelaunchFailureIsDurable(join(root, 'prelaunch-control'))
+
   console.log('control-m6-web-task-service-test: PASS (generic gate/artifact/restart + legacy compatibility)')
 } finally {
   await control.close().catch(() => {})
   if (priorTraceRoot === undefined) delete process.env.TRACE_OUT_DIR
   else process.env.TRACE_OUT_DIR = priorTraceRoot
   await rm(root, { recursive: true, force: true })
+}
+
+async function prelaunchFailureIsDurable(storeRoot) {
+  const sentinel = 'm6-provider-secret-must-not-persist'
+  let injectCalls = 0
+  const secretProvider = {
+    credentialConfigured() {
+      return false
+    },
+    async injectModelCredential() {
+      injectCalls += 1
+      if (injectCalls === 1) throw new Error(`provider unavailable: ${sentinel}`)
+    },
+    redact(value) {
+      return redactSentinel(value, sentinel)
+    },
+  }
+  const prelaunch = createWebControlServer({
+    controlStoreDir: storeRoot,
+    webTaskRuntimeDriver: driver.execute ? driver : undefined,
+    serviceSecurity: {
+      schemaVersion: 'web-service-security/v1',
+      secretProvider,
+      authenticate: ({ authorization }) => authorization === `Bearer ${token}`
+        ? {
+            schemaVersion: 'service-principal/v1',
+            actorId: 'm6-service-actor',
+            authentication: 'bearer',
+            scope,
+          }
+        : undefined,
+    },
+  })
+  try {
+    await listen(prelaunch.server)
+    const base = address(prelaunch.server)
+    const failedResponse = await request(base, '/api/runs', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'm6-prelaunch-failure',
+      },
+      body: JSON.stringify({
+        schemaVersion: 'run-client-create/v1',
+        input: genericSnapshot('client-prelaunch-failure'),
+      }),
+    })
+    const failedPayload = await failedResponse.json()
+    assert.equal(failedResponse.status, 500)
+    assert.equal(JSON.stringify(failedPayload).includes(sentinel), false)
+
+    const listed = await json(base, '/api/runs')
+    const failedRun = listed.items.find((item) => item.state === 'failed')
+    assert(failedRun, 'pre-launch exception left no durable failed Run')
+    assert.equal((failedRun.reason ?? '').includes(sentinel), false)
+
+    outcomeMode = 'artifact'
+    const healthy = await createGenericRun(
+      base,
+      'm6-after-prelaunch-failure',
+      genericSnapshot('client-after-prelaunch-failure'),
+    )
+    const healthyRun = await waitForState(base, healthy.runId, ['completed', 'failed', 'blocked_on_human'])
+    assert.equal(healthyRun.state, 'completed', 'one provider failure poisoned a later same-tenant run')
+    assert.equal((await json(base, `/api/runs/${encodeURIComponent(failedRun.runId)}`)).state, 'failed')
+  } finally {
+    await prelaunch.close().catch(() => {})
+  }
+  assert.equal((await readTree(storeRoot)).includes(sentinel), false, 'pre-launch secret reached durable storage')
+}
+
+function redactSentinel(value, sentinel) {
+  if (typeof value === 'string') return value.split(sentinel).join('[REDACTED]')
+  if (Array.isArray(value)) return value.map((item) => redactSentinel(item, sentinel))
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, redactSentinel(item, sentinel)]),
+    )
+  }
+  return value
+}
+
+async function readTree(rootDir) {
+  let output = ''
+  for (const entry of await readdir(rootDir, { withFileTypes: true })) {
+    const path = join(rootDir, entry.name)
+    if (entry.isDirectory()) output += await readTree(path)
+    else output += await readFile(path, 'utf8').catch(() => '')
+  }
+  return output
 }
 
 function createControl(webTaskRuntimeDriver, disableExecution = false) {

@@ -112,6 +112,7 @@ async function scenario(name, calls, defs, options = {}) {
       goal: name, resume: profile(), llm: new OneBatchLlm(calls), registry: new ToolRegistry(defs),
       ctx: { sessionId, highlight: false, trace }, session, gate: options.gate,
       completionGate: options.completionGate, maxSteps: 3, abortSignal: options.abortSignal,
+      taskContract: options.taskContract, taskPolicy: options.taskPolicy,
       toolOrchestration: options.toolOrchestration,
       backgroundToolBridge: options.backgroundToolBridge,
     })
@@ -201,17 +202,44 @@ await check('real Agent Loop background pilot returns immediate advisory task re
 
 await check('real Agent Loop: permission deny pairs declared suffix exactly once', async () => {
   const calls = [
-    { id: 'deny-0', name: 'browser_click_text', arguments: { text: 'Submit application' } },
+    { id: 'deny-0', name: 'browser_open', arguments: { url: 'https://example.test/apply' } },
     { id: 'deny-1', name: 'after_deny', arguments: {} },
   ]
   const gate = new DelayedGate('decline')
+  const navigationRule = {
+    id: 'o9-navigation-approval',
+    actionKinds: ['navigate'],
+    decision: 'ask',
+    destinationOrigins: ['https://example.test'],
+    requireApprovalBinding: true,
+  }
   const run = await scenario('deny', calls, [
-    def('browser_click_text', async () => ({ observation: 'must not execute' }), { risk: 'L3', execution: browserPolicy }),
+    def('browser_open', async () => ({ observation: 'must not execute' }), { risk: 'L3', execution: browserPolicy }),
     def('after_deny', async () => ({ observation: 'must not execute' })),
-  ], { gate })
+  ], {
+    gate,
+    taskContract: {
+      schemaVersion: 'web-task-contract/v1',
+      contractId: 'o9-navigation-contract',
+      revision: 1,
+      criteria: [{
+        id: 'navigation-not-performed',
+        kind: 'action_boundary',
+        description: 'Navigation must remain unperformed after user decline.',
+        actionKinds: ['navigate'],
+        outcome: 'not_performed',
+      }],
+      sensitiveActions: [navigationRule],
+    },
+    taskPolicy: {
+      schemaVersion: 'task-policy/v1',
+      defaultSensitiveAction: 'deny',
+      rules: [navigationRule],
+    },
+  })
   assertPaired(run.transcript, calls)
   assert.equal(gate.maxActive, 1)
-  assert.match(String(synthetic(run.transcript, 'deny-0')?.result?.observation), /FINAL_SUBMIT_NOT_EXECUTED_AUTOMATICALLY/)
+  assert.match(String(synthetic(run.transcript, 'deny-0')?.result?.observation), /BLOCKED by human gate \(decline\)/)
   assert.match(String(synthetic(run.transcript, 'deny-1')?.result?.observation), /EARLIER_TOOL_BLOCKED/)
   return { resultIds: pairedResultIds(run.transcript), gateMaxActive: gate.maxActive }
 })

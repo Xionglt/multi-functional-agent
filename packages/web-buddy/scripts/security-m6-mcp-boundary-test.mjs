@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
+import { fileURLToPath } from 'node:url'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { callBrowserTool, TOOL_DEFINITIONS } from '../dist/tools/index.js'
 
 const observationTools = [
@@ -16,6 +20,26 @@ assert.deepEqual(
   [...observationTools].sort(),
   'the default MCP surface must only advertise observation tools',
 )
+
+const mcpClient = new Client({ name: 'm6-boundary-test', version: '1.0.0' })
+const packageRoot = fileURLToPath(new URL('..', import.meta.url))
+const packageManifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+const mcpTransport = new StdioClientTransport({
+  command: process.execPath,
+  args: ['./dist/server.js'],
+  cwd: packageRoot,
+  stderr: 'pipe',
+})
+try {
+  await mcpClient.connect(mcpTransport)
+  assert.deepEqual(
+    mcpClient.getServerVersion(),
+    { name: 'web-buddy', version: packageManifest.version },
+    'MCP handshake metadata must match the public package release',
+  )
+} finally {
+  await mcpClient.close()
+}
 
 let collectorHits = 0
 let collectorBody = ''

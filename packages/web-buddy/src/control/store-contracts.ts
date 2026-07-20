@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { WebTaskContractError, validateWebTaskInputSnapshot } from '../task/contracts.js'
 import type {
   ActionBinding,
   ApprovalBinding,
@@ -320,7 +321,17 @@ export function validateRunRecord(record: RunRecord): void {
   integer(record.runRevision, 'runRevision')
   positiveInteger(record.attempt, 'attempt')
   if (!RUN_STATES.has(record.state)) invalid(`Unsupported run state: ${String(record.state)}`)
-  if (record.inputSnapshot?.schemaVersion !== 'web-task-input-snapshot/v1') invalid('inputSnapshot must be web-task-input-snapshot/v1.')
+  try {
+    validateWebTaskInputSnapshot(record.inputSnapshot)
+  } catch (error) {
+    if (error instanceof WebTaskContractError) {
+      if (error.code === 'BINDING_MISMATCH') binding(`inputSnapshot is invalid: ${error.message}`)
+      if (error.code === 'UNSUPPORTED_SCHEMA_VERSION') {
+        throw new ControlStoreError('UNSUPPORTED_SCHEMA_VERSION', `inputSnapshot is invalid: ${error.message}`)
+      }
+    }
+    invalid(`inputSnapshot is invalid: ${errorMessage(error)}`)
+  }
   if (record.inputSnapshot.runId !== record.runId) binding('inputSnapshot.runId does not match runId.')
   if (record.inputDigest !== record.inputSnapshot.sha256 || !SHA256.test(record.inputDigest)) invalid('inputDigest must match inputSnapshot.sha256.')
   if (record.runRevision < record.inputSnapshot.revision) invalid('runRevision cannot precede the frozen input revision.')

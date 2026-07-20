@@ -120,7 +120,7 @@ export async function runWebTask(input: WebTaskInput): Promise<WebTaskResult> {
   try {
     outcome = await driver.execute({
       schemaVersion: 'web-task-runtime-request/v1',
-      input: { ...snapshot, contextItems },
+      input: snapshot,
       contextItems,
       ...(input.runtime ? { runtime: { maxSteps: input.runtime.maxSteps, traceOutDir: input.runtime.traceOutDir, headless: input.runtime.headless } } : {}),
       emit: (event) => emit(event),

@@ -53,6 +53,7 @@ import {
   validateArtifactRef,
   validateCheckpointRef,
   validateSessionRef,
+  validateWebTaskInputSnapshot,
   type ArtifactRef,
   type JsonObject,
   type OwnerScope,
@@ -1264,8 +1265,10 @@ function prepareRunInput(
     return { kind: 'legacy', launchOptions: parseLaunchOptions(body, allowPrivateNetwork) }
   }
   const input = plainRecord(body.input, 'input')
-  if (input.schemaVersion !== 'web-task-input-snapshot/v1') {
-    throw new HttpError(400, 'input must be web-task-input-snapshot/v1')
+  try {
+    validateWebTaskInputSnapshot(input as unknown as WebTaskInputSnapshot)
+  } catch (error) {
+    throw new HttpError(400, error instanceof Error ? error.message : String(error))
   }
   if (input.sessionRef !== undefined) {
     throw new HttpError(400, 'service create does not accept a pre-bound SessionRef')

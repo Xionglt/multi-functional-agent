@@ -434,8 +434,7 @@ export class WebTaskContractError extends Error {
 
 export function validateWebTaskInput(input: WebTaskInput): void {
   if (input.schemaVersion !== 'web-task-input/v1') unsupported('WebTaskInput', input.schemaVersion)
-  nonEmpty(input.goal?.instruction, 'goal.instruction')
-  validateJsonValue(input.goal.metadata, 'goal.metadata')
+  validateTaskGoal(input.goal, 'goal')
   validateTaskContract(input.contract)
   if (input.startUrl) validateStartUrl(input.startUrl)
   integer(input.revision ?? 0, 'revision')
@@ -451,40 +450,148 @@ export function validateWebTaskInput(input: WebTaskInput): void {
   if (input.sessionRef) validateSessionRef(input.sessionRef, input.runId ?? input.sessionRef.runId)
 }
 
+export function validateWebTaskInputSnapshot(
+  input: WebTaskInputSnapshot,
+): void {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) invalid('WebTaskInputSnapshot must be an object.')
+  if (input.schemaVersion !== 'web-task-input-snapshot/v1') unsupported('WebTaskInputSnapshot', input.schemaVersion)
+  if (input.inputSchemaVersion !== 'web-task-input/v1') unsupported('WebTaskInput', input.inputSchemaVersion)
+  exactKeys(input as unknown as Record<string, unknown>, [
+    'schemaVersion',
+    'inputSchemaVersion',
+    'goal',
+    'contract',
+    'startUrl',
+    'contextItems',
+    'contextProviders',
+    'policy',
+    'runId',
+    'sessionRef',
+    'revision',
+    'ownerScope',
+    'sha256',
+  ], 'WebTaskInputSnapshot')
+  nonEmpty(input.runId, 'snapshot.runId')
+  validateTaskGoal(input.goal, 'snapshot.goal')
+  validateTaskContract(input.contract)
+  if (input.startUrl) validateStartUrl(input.startUrl)
+  if (!Array.isArray(input.contextItems)) invalid('snapshot.contextItems must be an array.')
+  input.contextItems.forEach(validateContextItem)
+  unique(input.contextItems.map((item) => item.id), 'snapshot context item id')
+  if (!Array.isArray(input.contextProviders)) invalid('snapshot.contextProviders must be an array.')
+  for (const provider of input.contextProviders) {
+    nonEmpty(provider.id, 'snapshot.contextProvider.id')
+    nonEmpty(provider.version, `snapshot.contextProvider(${provider.id}).version`)
+  }
+  unique(input.contextProviders.map((provider) => provider.id), 'snapshot context provider id')
+  if (input.policy) validateTaskPolicy(input.policy)
+  integer(input.revision, 'snapshot.revision')
+  if (input.revision !== input.contract.revision) {
+    throw new WebTaskContractError('BINDING_MISMATCH', 'Snapshot revision must match TaskContract revision.')
+  }
+  if (input.sessionRef) validateSessionRef(input.sessionRef, input.runId)
+  validateOwnerScope(input.ownerScope)
+  if (!/^[a-f0-9]{64}$/i.test(input.sha256)) invalid('snapshot.sha256 must be a SHA-256 hex digest.')
+  const { sha256: _sha256, ...unsigned } = input
+  if (digestCanonicalJson(unsigned) !== input.sha256) {
+    throw new WebTaskContractError('BINDING_MISMATCH', 'Snapshot sha256 does not match its canonical payload.')
+  }
+}
+
+function validateTaskGoal(goal: TaskGoal, path: string): void {
+  exactKeys(goal as unknown as Record<string, unknown>, [
+    'instruction',
+    'scenario',
+    'metadata',
+  ], path)
+  nonEmpty(goal?.instruction, `${path}.instruction`)
+  if (goal?.scenario !== undefined) nonEmpty(goal.scenario, `${path}.scenario`)
+  validateJsonValue(goal?.metadata, `${path}.metadata`)
+}
+
 export function validateTaskContract(contract: TaskContract): void {
   if (contract?.schemaVersion !== 'web-task-contract/v1') unsupported('TaskContract', contract?.schemaVersion)
+  exactKeys(contract as unknown as Record<string, unknown>, [
+    'schemaVersion',
+    'contractId',
+    'revision',
+    'criteria',
+    'requiredEvidence',
+    'sensitiveActions',
+  ], 'TaskContract')
   nonEmpty(contract.contractId, 'contract.contractId')
   integer(contract.revision, 'contract.revision')
   if (!Array.isArray(contract.criteria) || contract.criteria.length === 0) invalid('contract.criteria must be non-empty.')
   unique(contract.criteria.map((criterion) => criterion.id), 'criterion id')
   for (const criterion of contract.criteria) {
+    const baseKeys = ['id', 'kind', 'description', 'required']
     nonEmpty(criterion.id, 'criterion.id')
     nonEmpty(criterion.description, `criterion(${criterion.id}).description`)
     if (criterion.kind === 'evidence_present') {
+      exactKeys(criterion as unknown as Record<string, unknown>, [
+        ...baseKeys,
+        'evidenceKinds',
+        'minCount',
+        'allowedAuthorities',
+        'maxAgeMs',
+      ], `criterion(${criterion.id})`)
       nonEmptyArray(criterion.evidenceKinds, `${criterion.id}.evidenceKinds`)
       positiveInteger(criterion.minCount, `${criterion.id}.minCount`)
       nonEmptyArray(criterion.allowedAuthorities, `${criterion.id}.allowedAuthorities`)
       if (criterion.maxAgeMs !== undefined) nonNegativeInteger(criterion.maxAgeMs, `${criterion.id}.maxAgeMs`)
     } else if (criterion.kind === 'artifact_present') {
+      exactKeys(criterion as unknown as Record<string, unknown>, [
+        ...baseKeys,
+        'artifactKinds',
+        'minCount',
+        'schemaVersions',
+      ], `criterion(${criterion.id})`)
       nonEmptyArray(criterion.artifactKinds, `${criterion.id}.artifactKinds`)
       positiveInteger(criterion.minCount, `${criterion.id}.minCount`)
     } else if (criterion.kind === 'form_state') {
+      exactKeys(criterion as unknown as Record<string, unknown>, [
+        ...baseKeys,
+        'requireFullAudit',
+        'requiredFieldCoverage',
+        'allowVisibleErrors',
+        'requireDraftOnly',
+      ], `criterion(${criterion.id})`)
       if (!Number.isFinite(criterion.requiredFieldCoverage) || criterion.requiredFieldCoverage < 0 || criterion.requiredFieldCoverage > 1) invalid(`${criterion.id}.requiredFieldCoverage must be between 0 and 1.`)
     } else if (criterion.kind === 'human_confirmation') {
+      exactKeys(criterion as unknown as Record<string, unknown>, [
+        ...baseKeys,
+        'confirmationKind',
+        'actionId',
+      ], `criterion(${criterion.id})`)
       nonEmpty(criterion.confirmationKind, `${criterion.id}.confirmationKind`)
     } else if (criterion.kind === 'action_boundary') {
+      exactKeys(criterion as unknown as Record<string, unknown>, [
+        ...baseKeys,
+        'actionKinds',
+        'outcome',
+      ], `criterion(${criterion.id})`)
       nonEmptyArray(criterion.actionKinds, `${criterion.id}.actionKinds`)
     } else {
       invalid(`Unknown completion criterion kind: ${(criterion as { kind?: unknown }).kind}`)
     }
   }
   for (const requirement of contract.requiredEvidence ?? []) {
+    exactKeys(requirement as unknown as Record<string, unknown>, [
+      'id',
+      'kinds',
+      'minCount',
+      'allowedAuthorities',
+      'origins',
+      'maxAgeMs',
+      'independentlyObserved',
+    ], `evidenceRequirement(${requirement.id})`)
     nonEmpty(requirement.id, 'evidenceRequirement.id')
     nonEmptyArray(requirement.kinds, `${requirement.id}.kinds`)
     nonEmptyArray(requirement.allowedAuthorities, `${requirement.id}.allowedAuthorities`)
     positiveInteger(requirement.minCount, `${requirement.id}.minCount`)
     if (requirement.maxAgeMs !== undefined) nonNegativeInteger(requirement.maxAgeMs, `${requirement.id}.maxAgeMs`)
   }
+  validateSensitiveActionRules(contract.sensitiveActions ?? [], 'TaskContract.sensitiveActions')
 }
 
 export function validateAgentRole(role: AgentRole): void {
@@ -499,8 +606,29 @@ export function validateAgentRole(role: AgentRole): void {
 
 export function validateTaskPolicy(policy: TaskPolicy): void {
   if (policy.schemaVersion !== 'task-policy/v1') unsupported('TaskPolicy', policy.schemaVersion)
-  unique(policy.rules.map((rule) => rule.id), 'sensitive action rule id')
-  for (const rule of policy.rules) {
+  exactKeys(policy as unknown as Record<string, unknown>, [
+    'schemaVersion',
+    'defaultSensitiveAction',
+    'rules',
+  ], 'TaskPolicy')
+  validateSensitiveActionRules(policy.rules, 'TaskPolicy.rules')
+}
+
+function validateSensitiveActionRules(
+  rules: readonly SensitiveActionRule[],
+  path: string,
+): void {
+  if (!Array.isArray(rules)) invalid(`${path} must be an array.`)
+  unique(rules.map((rule) => rule.id), 'sensitive action rule id')
+  for (const rule of rules) {
+    exactKeys(rule as unknown as Record<string, unknown>, [
+      'id',
+      'actionKinds',
+      'decision',
+      'sourceSensitivities',
+      'destinationOrigins',
+      'requireApprovalBinding',
+    ], `sensitiveActionRule(${rule.id})`)
     nonEmpty(rule.id, 'sensitiveActionRule.id')
     nonEmptyArray(rule.actionKinds, `${rule.id}.actionKinds`)
     for (const origin of rule.destinationOrigins ?? []) validateFullOrigin(origin, `${rule.id}.destinationOrigins`)
@@ -562,6 +690,14 @@ export function validateActionBinding(binding: ActionBinding, runId = binding.ru
 
 export function validateSessionRef(ref: SessionRef, runId: string, expectedAttempt?: number): void {
   if (ref.schemaVersion !== 'session-ref/v1') unsupported('SessionRef', ref.schemaVersion)
+  exactKeys(ref as unknown as Record<string, unknown>, [
+    'schemaVersion',
+    'provider',
+    'id',
+    'runId',
+    'attempt',
+    'checkpointRef',
+  ], 'SessionRef')
   if (ref.runId !== runId || (expectedAttempt !== undefined && ref.attempt !== expectedAttempt)) {
     throw new WebTaskContractError('BINDING_MISMATCH', 'SessionRef does not match the current run/attempt.')
   }
@@ -573,6 +709,11 @@ export function validateSessionRef(ref: SessionRef, runId: string, expectedAttem
 
 export function validateCheckpointRef(ref: CheckpointRef): void {
   if (ref.schemaVersion !== 'checkpoint-ref/v1') unsupported('CheckpointRef', ref.schemaVersion)
+  exactKeys(ref as unknown as Record<string, unknown>, [
+    'schemaVersion',
+    'provider',
+    'id',
+  ], 'CheckpointRef')
   nonEmpty(ref.provider, 'checkpointRef.provider')
   nonEmpty(ref.id, 'checkpointRef.id')
 }
@@ -596,6 +737,60 @@ export function consumeApprovalBinding(
 
 export function validateContextItem(item: ContextItem): void {
   if (item.schemaVersion !== 'context-item/v1') unsupported('ContextItem', item.schemaVersion)
+  exactKeys(item as unknown as Record<string, unknown>, [
+    'schemaVersion',
+    'id',
+    'kind',
+    'content',
+    'origin',
+    'trust',
+    'instructionAuthority',
+    'sensitivity',
+    'sensitiveClasses',
+    'provenance',
+    'allowedUses',
+    'freshness',
+    'retention',
+    'sanitization',
+    'integrity',
+    'memory',
+  ], `ContextItem(${item.id})`)
+  exactKeys(item.provenance as unknown as Record<string, unknown>, [
+    'capturedAt',
+    'parentContentIds',
+    'runId',
+    'sessionId',
+    'sourceUrl',
+    'sourceOrigin',
+    'toolCallId',
+    'artifactId',
+    'sha256',
+  ], `${item.id}.provenance`)
+  exactKeys(item.freshness as unknown as Record<string, unknown>, [
+    'validity',
+    'revision',
+    'actionSeq',
+    'pageRevision',
+    'workflowRevision',
+    'expiresAt',
+  ], `${item.id}.freshness`)
+  exactKeys(item.retention as unknown as Record<string, unknown>, [
+    'scope',
+    'expiresAt',
+    'deleteWithSession',
+    'audience',
+  ], `${item.id}.retention`)
+  exactKeys(item.sanitization as unknown as Record<string, unknown>, [
+    'policyId',
+    'status',
+    'redactedFields',
+    'instructionNeutralized',
+    'transformedFrom',
+  ], `${item.id}.sanitization`)
+  exactKeys(item.integrity as unknown as Record<string, unknown>, [
+    'immutable',
+    'digestVerified',
+  ], `${item.id}.integrity`)
   nonEmpty(item.id, 'contextItem.id')
   nonEmpty(item.kind, 'contextItem.kind')
   validateJsonValue(item.content, `${item.id}.content`)
@@ -696,8 +891,36 @@ function validateJsonValue(value: unknown, path: string): void {
 
 function validateMemoryBinding(memory: MemoryBinding, id: string): void {
   if (memory.schemaVersion !== 'memory-binding/v1') unsupported('MemoryBinding', memory.schemaVersion)
+  exactKeys(memory as unknown as Record<string, unknown>, [
+    'schemaVersion',
+    'memoryId',
+    'revision',
+    'scope',
+    'status',
+    'expiresAt',
+    'supersedesIds',
+    'conflictIds',
+    'tombstoneAt',
+  ], `${id}.memory`)
   nonEmpty(memory.memoryId, `${id}.memory.memoryId`)
   integer(memory.revision, `${id}.memory.revision`)
+}
+
+function validateOwnerScope(scope: OwnerScope | undefined): void {
+  if (!scope) return
+  if (scope.schemaVersion !== 'owner-scope/v1') unsupported('OwnerScope', scope.schemaVersion)
+  exactKeys(scope as unknown as Record<string, unknown>, [
+    'schemaVersion',
+    'tenantId',
+    'userId',
+    'projectId',
+  ], 'OwnerScope')
+  if (!scope.tenantId && !scope.userId && !scope.projectId) {
+    invalid('ownerScope must identify at least one tenant, user or project.')
+  }
+  for (const value of [scope.tenantId, scope.userId, scope.projectId]) {
+    if (value !== undefined) nonEmpty(value, 'ownerScope value')
+  }
 }
 
 function isTrustAllowedForContextOrigin(origin: ContentOrigin, trust: ContentTrust): boolean {
@@ -755,6 +978,17 @@ function isoTimestamp(value: string, path: string): void {
   if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
     invalid(`${path} must be a canonical UTC ISO timestamp.`)
   }
+}
+
+function exactKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  path: string,
+): void {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) invalid(`${path} must be an object.`)
+  const allowedKeys = new Set(allowed)
+  const unknown = Object.keys(value).filter((key) => !allowedKeys.has(key))
+  if (unknown.length) invalid(`${path} contains unsupported field(s): ${unknown.sort().join(', ')}.`)
 }
 
 function unique(values: string[], description: string): void {

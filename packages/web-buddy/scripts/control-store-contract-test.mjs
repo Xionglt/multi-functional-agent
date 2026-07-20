@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs'
 const distUrl = new URL('../dist/control/store-contracts.js', import.meta.url)
 const sourceUrl = new URL('../src/control/store-contracts.ts', import.meta.url)
 const contracts = await import(existsSync(distUrl) ? distUrl : sourceUrl)
+const taskContracts = await import(new URL('../dist/task/contracts.js', import.meta.url))
 
 const {
   APPROVAL_EVENT_SCHEMA_VERSION,
@@ -21,6 +22,7 @@ const {
   validateRunCreate,
   validateRunMutation,
 } = contracts
+const { snapshotWebTaskInput } = taskContracts
 
 const runId = 'run-control-c1'
 const now = '2026-07-17T01:00:00.000Z'
@@ -36,9 +38,8 @@ const sessionRef = {
   runId,
   attempt: 1,
 }
-const inputSnapshot = {
-  schemaVersion: 'web-task-input-snapshot/v1',
-  inputSchemaVersion: 'web-task-input/v1',
+const taskInput = {
+  schemaVersion: 'web-task-input/v1',
   goal: { instruction: 'Research a deterministic fixture.' },
   contract: {
     schemaVersion: 'web-task-contract/v1',
@@ -54,12 +55,11 @@ const inputSnapshot = {
     }],
   },
   contextItems: [],
-  contextProviders: [],
   runId,
   revision: 0,
   ownerScope,
-  sha256: 'a'.repeat(64),
 }
+const inputSnapshot = snapshotWebTaskInput(taskInput, runId)
 
 const run = {
   schemaVersion: RUN_RECORD_SCHEMA_VERSION,
@@ -105,7 +105,11 @@ assert.equal(decodeRunRecord(JSON.parse(JSON.stringify(run))).ownerScope.tenantI
 const localRun = structuredClone(run)
 const localRunCreated = structuredClone(runCreated)
 delete localRun.ownerScope
-delete localRun.inputSnapshot.ownerScope
+localRun.inputSnapshot = snapshotWebTaskInput({
+  ...taskInput,
+  ownerScope: undefined,
+}, runId)
+localRun.inputDigest = localRun.inputSnapshot.sha256
 delete localRunCreated.ownerScope
 validateRunCreate({
   record: localRun,

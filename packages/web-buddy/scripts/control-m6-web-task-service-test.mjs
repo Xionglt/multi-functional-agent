@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { emptyRunMetrics } from '../dist/metrics/schema.js'
-import { snapshotWebTaskInput } from '../dist/task/contracts.js'
+import { digestCanonicalJson, snapshotWebTaskInput } from '../dist/task/contracts.js'
 import { createWebControlServer } from '../dist/web/server.js'
 
 const root = await mkdtemp(join(tmpdir(), 'web-buddy-m6-web-task-service-'))
@@ -96,10 +96,49 @@ try {
   await listen(control.server)
   let base = address(control.server)
 
+  const staleDigest = genericSnapshot('client-stale-digest')
+  staleDigest.goal.instruction = 'Tampered after the snapshot was signed.'
+  await expectRejectedSnapshot(base, 'm6-stale-digest', staleDigest)
+
+  const unknownInputVersion = genericSnapshot('client-unknown-input-version')
+  unknownInputVersion.inputSchemaVersion = 'web-task-input/v999'
+  rehashSnapshot(unknownInputVersion)
+  await expectRejectedSnapshot(base, 'm6-unknown-input-version', unknownInputVersion)
+
+  const unknownAuthorityField = genericSnapshot('client-unknown-authority-field')
+  unknownAuthorityField.elevatedAuthority = 'browser_writer'
+  rehashSnapshot(unknownAuthorityField)
+  await expectRejectedSnapshot(base, 'm6-unknown-authority-field', unknownAuthorityField)
+
+  const unknownGoalAuthority = genericSnapshot('client-unknown-goal-authority')
+  unknownGoalAuthority.goal.authority = 'system_policy'
+  rehashSnapshot(unknownGoalAuthority)
+  await expectRejectedSnapshot(base, 'm6-unknown-goal-authority', unknownGoalAuthority)
+
+  const unknownPolicyAuthority = genericSnapshot('client-unknown-policy-authority')
+  unknownPolicyAuthority.policy.allowWithoutApproval = true
+  rehashSnapshot(unknownPolicyAuthority)
+  await expectRejectedSnapshot(base, 'm6-unknown-policy-authority', unknownPolicyAuthority)
+
+  const unknownContextAuthority = genericSnapshot('client-unknown-context-authority')
+  unknownContextAuthority.contextItems[0].browserWriteAuthority = true
+  rehashSnapshot(unknownContextAuthority)
+  await expectRejectedSnapshot(base, 'm6-unknown-context-authority', unknownContextAuthority)
+
   const completed = await createGenericRun(base, 'm6-generic-artifact', genericSnapshot('client-artifact'))
   const completedRun = await waitForState(base, completed.runId, ['completed', 'failed', 'blocked_on_human'])
   assert.equal(completedRun.state, 'completed')
   assert.equal(driverRequests.length, 1, 'generic snapshot did not execute through the injected runtime driver')
+  assert.equal(
+    driverRequests[0].input.sha256,
+    snapshotDigest(driverRequests[0].input),
+    'runtime driver received context that no longer matched the declared snapshot digest',
+  )
+  assert.equal(
+    driverRequests[0].input.sha256,
+    (await control.runService.get(completed.runId, { ownerScope })).inputDigest,
+    'runtime driver input must remain the exact frozen server snapshot',
+  )
   assert.equal(driverRequests[0].input.contract.contractId, 'm6-comparison-contract')
   assert.equal(driverRequests[0].contextItems[0].id, 'm6-comparison-context')
   assert.equal(driverRequests[0].input.policy.defaultSensitiveAction, 'deny')
@@ -305,6 +344,31 @@ async function createGenericRun(base, idempotencyKey, input) {
   const payload = await response.json()
   assert.equal(response.status, 201, JSON.stringify(payload))
   return payload
+}
+
+async function expectRejectedSnapshot(base, idempotencyKey, input) {
+  const response = await request(base, '/api/runs', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'idempotency-key': idempotencyKey,
+    },
+    body: JSON.stringify({
+      schemaVersion: 'run-client-create/v1',
+      input,
+    }),
+  })
+  assert.equal(response.status, 400, JSON.stringify(await response.json()))
+  assert.equal(driverRequests.length, 0, 'invalid snapshot reached the runtime driver')
+}
+
+function rehashSnapshot(snapshot) {
+  snapshot.sha256 = snapshotDigest(snapshot)
+}
+
+function snapshotDigest(snapshot) {
+  const { sha256: _sha256, ...unsigned } = snapshot
+  return digestCanonicalJson(unsigned)
 }
 
 async function waitForState(base, runId, states) {

@@ -14,6 +14,7 @@ import {
   controlRecordDigest,
   fileControlStorePaths,
 } from '../dist/control/index.js'
+import { snapshotWebTaskInput } from '../dist/task/contracts.js'
 
 const root = await mkdtemp(join(tmpdir(), 'web-buddy-control-store-'))
 const ownerScope = {
@@ -194,9 +195,8 @@ async function runApprovalMatrix() {
 
 function runCreate(runId) {
   const now = '2026-07-17T03:00:00.000Z'
-  const snapshot = {
-    schemaVersion: 'web-task-input-snapshot/v1',
-    inputSchemaVersion: 'web-task-input/v1',
+  const snapshot = snapshotWebTaskInput({
+    schemaVersion: 'web-task-input/v1',
     goal: { instruction: 'Research a deterministic fixture.' },
     contract: {
       schemaVersion: 'web-task-contract/v1',
@@ -212,12 +212,10 @@ function runCreate(runId) {
       }],
     },
     contextItems: [],
-    contextProviders: [],
     runId,
     revision: 0,
     ownerScope,
-    sha256: 'a'.repeat(64),
-  }
+  }, runId)
   const record = {
     schemaVersion: RUN_RECORD_SCHEMA_VERSION,
     runId,

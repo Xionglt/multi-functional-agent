@@ -56,6 +56,16 @@ assert.notEqual(
   digestCanonicalJson(protoAuthorityGranted),
   'authority-bearing own keys must change the canonical digest',
 )
+assert.throws(
+  () => canonicalJson(new Date('2026-07-20T00:00:00.000Z')),
+  /non-plain object/,
+  'class instances must not collapse to an empty canonical object',
+)
+assert.throws(
+  () => canonicalJson(new Array(1)),
+  /sparse or extended array/,
+  'array holes must not collide with explicit null values',
+)
 
 assert.throws(
   () => validateContextItem(contextItem({ id: 'secret', sensitivity: 'secret', allowedUses: ['prompt'] })),

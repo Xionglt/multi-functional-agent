@@ -766,7 +766,14 @@ function canonicalize(value: unknown, seen: WeakSet<object>, path: string): Json
   if (seen.has(object)) invalid(`${path} contains a cycle.`)
   seen.add(object)
   try {
-    if (Array.isArray(value)) return value.map((item, index) => canonicalize(item, seen, `${path}[${index}]`))
+    if (Array.isArray(value)) {
+      if (Object.getPrototypeOf(value) !== Array.prototype
+        || Object.keys(value).length !== value.length
+        || Object.keys(value).some((key, index) => key !== String(index))) {
+        invalid(`${path} contains a sparse or extended array.`)
+      }
+      return value.map((item, index) => canonicalize(item, seen, `${path}[${index}]`))
+    }
     const prototype = Object.getPrototypeOf(value)
     if (prototype !== Object.prototype && prototype !== null) invalid(`${path} contains a non-plain object.`)
     const output = Object.create(null) as JsonObject

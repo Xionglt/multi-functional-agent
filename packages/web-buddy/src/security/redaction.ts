@@ -63,6 +63,7 @@ function visit(
   if (typeof value === 'object' && value) {
     const output: Record<string, JsonValue> = {}
     for (const [childKey, child] of Object.entries(value)) {
+      if (child === undefined) continue
       output[childKey] = visit(child, `${path}.${childKey}`, childKey, findings)
     }
     return output

@@ -898,14 +898,20 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         return
       }
       if (control === 'cancel') {
-        const run = await runService.requestCancel(runId, idempotencyKey, storeScope)
-        executions.get(runId)?.controller.abort('Cancel requested from control plane.')
+        const liveExecution = executions.get(runId)
         await approvalService.cancelPendingForRun(
           runId,
           'Run was cancelled while awaiting approval.',
-          `cancel-approval-fence:${run.runRevision}:${run.attempt}`,
+          `cancel-approval-fence:${visible.runRevision}:${visible.attempt}`,
           storeScope,
         )
+        const run = await runService.requestCancel(
+          runId,
+          idempotencyKey,
+          storeScope,
+          { quiescent: !liveExecution },
+        )
+        liveExecution?.controller.abort('Cancel requested from control plane.')
         await security.audit({
           principal,
           requestId,
@@ -1090,7 +1096,8 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       const approvalRun = await runService.get(approval.runId, storeScope)
       if (!approvalRun
         || approvalRun.runRevision !== approval.runRevision
-        || approvalRun.attempt !== approval.attempt) {
+        || approvalRun.attempt !== approval.attempt
+        || !['running', 'pausing', 'blocked_on_human'].includes(approvalRun.state)) {
         throw new ControlStoreError(
           'BINDING_MISMATCH',
           'Approval belongs to a stale run revision/attempt and cannot be resolved.',

@@ -132,6 +132,92 @@ try {
   const cancelledAgain = await json(base, `/api/runs/${encodeURIComponent(cancelCreated.runId)}/cancel`, cancelRequest)
   assert.equal(cancelledAgain.state, 'cancelled', 'cancel endpoint is idempotent')
 
+  const coldCreateResponse = await request(base, '/api/run', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      mode: 'demo-research',
+      startUrl: 'https://example.test/cold-research',
+      taskPrompt: 'Pause this read-only run at a safe boundary.',
+    }),
+  })
+  assert.equal(coldCreateResponse.status, 201)
+  const coldCreated = await coldCreateResponse.json()
+  await control.runService.start(coldCreated.runId, 'cold-start-c3', { ownerScope })
+  await control.runService.requestPause(coldCreated.runId, 'cold-pause-request-c3', { ownerScope })
+  const coldPausing = await control.runService.get(coldCreated.runId, { ownerScope })
+  await control.runService.acknowledgePause(coldCreated.runId, {
+    schemaVersion: 'safe-turn-boundary-ref/v1',
+    runId: coldCreated.runId,
+    runRevision: coldPausing.runRevision,
+    attempt: coldPausing.attempt,
+    turnId: 'cold-safe-turn-c3',
+    actionSeq: 1,
+    observedAt: new Date().toISOString(),
+  }, 'cold-pause-ack-c3', { ownerScope })
+  const coldApprovalId = 'approval-cold-c3'
+  const coldActionBinding = {
+    schemaVersion: 'action-binding/v1',
+    contractId: 'web-control-plane-legacy-adapter',
+    contractRevision: 0,
+    runId: coldCreated.runId,
+    actionId: 'cold-submit-c3',
+    toolName: 'browser_click',
+    argsSha256: 'c'.repeat(64),
+    sourceContentIds: ['cold-page-c3'],
+    sourceSensitiveClasses: [],
+    sourceOrigin: 'https://example.test',
+    destinationOrigin: 'https://example.test',
+    actionSeq: 1,
+    expiresAt: '2030-01-01T00:00:00.000Z',
+  }
+  const coldRequestedAt = new Date().toISOString()
+  await control.approvalService.enqueue({
+    approvalId: coldApprovalId,
+    runId: coldCreated.runId,
+    runRevision: 0,
+    attempt: 1,
+    status: 'pending',
+    ownerScope,
+    actionBinding: coldActionBinding,
+    allowedDecisions: ['approved', 'denied'],
+    requestedAt: coldRequestedAt,
+    expiresAt: '2030-01-01T00:00:00.000Z',
+  }, 'enqueue-cold-c3')
+  await control.runService.setPendingApproval(
+    coldCreated.runId,
+    coldApprovalId,
+    true,
+    'attach-cold-approval-c3',
+    { ownerScope },
+  )
+  const coldCancelRequest = {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'idempotency-key': 'api-cold-cancel-c3' },
+    body: JSON.stringify({ expectedRevision: coldCreated.revision }),
+  }
+  const coldCancelled = await json(
+    base,
+    `/api/runs/${encodeURIComponent(coldCreated.runId)}/cancel`,
+    coldCancelRequest,
+  )
+  assert.equal(coldCancelled.state, 'cancelled', 'a quiescent paused run must cancel atomically')
+  const coldCancelledAgain = await json(
+    base,
+    `/api/runs/${encodeURIComponent(coldCreated.runId)}/cancel`,
+    coldCancelRequest,
+  )
+  assert.equal(coldCancelledAgain.state, 'cancelled')
+  assert.equal(
+    (await control.approvalService.get(coldApprovalId, { ownerScope })).status,
+    'cancelled',
+    'cold cancel must invalidate pending approvals before returning',
+  )
+  assert.deepEqual(
+    (await control.runService.get(coldCreated.runId, { ownerScope })).pendingApprovalIds,
+    [],
+  )
+
   const actionBinding = {
     schemaVersion: 'action-binding/v1',
     contractId: 'web-control-plane-legacy-adapter',

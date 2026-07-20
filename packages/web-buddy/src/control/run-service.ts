@@ -44,15 +44,15 @@ const LEGAL_TRANSITIONS: Readonly<Record<RunLifecycleState, readonly RunLifecycl
   queued: ['running', 'cancelling', 'cancelled', 'failed'],
   running: ['pausing', 'blocked_on_human', 'cancelling', 'completed', 'failed', 'interrupted'],
   pausing: ['paused', 'cancelling', 'failed', 'interrupted'],
-  paused: ['resuming', 'cancelling'],
-  blocked_on_human: ['resuming', 'cancelling', 'failed'],
+  paused: ['resuming', 'cancelling', 'cancelled'],
+  blocked_on_human: ['resuming', 'cancelling', 'cancelled', 'failed'],
   resuming: ['running', 'cancelling', 'failed', 'interrupted'],
   cancelling: ['cancelled', 'failed'],
   cancelled: [],
   completed: [],
   failed: [],
   interrupted: ['recoverable', 'failed', 'cancelling'],
-  recoverable: ['resuming', 'cancelling', 'failed'],
+  recoverable: ['resuming', 'cancelling', 'cancelled', 'failed'],
 }
 
 export interface TransitionRunInput {
@@ -322,16 +322,28 @@ export class RunService {
     }, scope)
   }
 
-  async requestCancel(runId: string, idempotencyKey: string, scope?: ScopedStoreQuery): Promise<RunRecord> {
+  async requestCancel(
+    runId: string,
+    idempotencyKey: string,
+    scope?: ScopedStoreQuery,
+    options: { quiescent?: boolean } = {},
+  ): Promise<RunRecord> {
     const current = await this.require(runId, scope)
     if (current.state === 'cancelled' || current.state === 'cancelling') return current
-    if (current.state === 'queued') {
+    const quiescentTerminal = options.quiescent === true
+      && (current.state === 'paused'
+        || current.state === 'recoverable'
+        || current.state === 'blocked_on_human')
+    if (current.state === 'queued' || quiescentTerminal) {
       return this.transition(runId, {
         to: 'cancelled',
         idempotencyKey,
         eventType: 'control_requested',
-        reason: 'Cancelled before execution.',
-        data: { control: 'cancel' },
+        reason: current.state === 'queued'
+          ? 'Cancelled before execution.'
+          : 'Cancelled while no live execution owned the run.',
+        data: { control: 'cancel', quiescent: true },
+        update: () => ({ pendingApprovalIds: [] }),
       }, scope)
     }
     return this.transition(runId, {
@@ -339,6 +351,7 @@ export class RunService {
       idempotencyKey,
       eventType: 'control_requested',
       data: { control: 'cancel' },
+      update: () => ({ pendingApprovalIds: [] }),
     }, scope)
   }
 

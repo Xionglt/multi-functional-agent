@@ -276,9 +276,13 @@ runWebTask
 The Web service stores Run and Approval state through `RunService` and durable
 Stores. Pause is a request acknowledged only at a safe turn boundary; it is not
 a process sleep. Restart classifies eligible read-only sessions as recoverable,
-invalidates old approvals, and never replays the last write action. Generic
-service runs currently advertise `restartSafe=false`, so their resume endpoint
-fails closed until a compatible durable adapter exists.
+invalidates old approvals, and never replays the last write action. A generic
+run is restart-safe only when the caller explicitly opts in and the server
+revalidates a fixed `startUrl`, an all-deny Policy/Contract, read-only completion
+criteria, the built-in Runtime, and an exact durable SessionRef. Resume creates
+a new run revision/attempt, removes unmatched old tool calls, and re-observes
+the frozen URL. Form contracts, custom Runtime drivers, non-quiescent runs, and
+stale approvals fail closed.
 
 Artifacts and Trace references remain bound to run ID, revision, attempt, and
 owner scope. Approval resolution is additionally bound to the exact action,

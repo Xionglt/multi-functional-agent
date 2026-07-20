@@ -67,6 +67,12 @@ tenant/user scope。Run、Approval、Trace、Artifact 和 Memory 查询都按该
 动态改写。服务默认拒绝 localhost/私网目标，本地 fixture 只有在显式设置
 `WEB_BUDDY_ALLOW_PRIVATE_NETWORK_FOR_TESTING=true` 时才可访问。
 
+通用 Run 只有在调用方显式请求恢复、服务端重新验证为全 deny 的只读契约、
+使用内建 Runtime 且已有有效 durable session 时才能 resume。恢复会增加
+run revision/attempt、删除未完成的旧 tool call，并从冻结的 `startUrl` 重新观察；
+不会重放最后一个写操作。表单契约、自定义 Runtime driver、非静止 Run 和旧
+Approval 都不能借 `restartSafe` 提升权限。
+
 ## 场景能力
 
 | 场景 | 可完成的工作 | 默认安全边界 |

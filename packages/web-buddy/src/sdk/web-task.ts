@@ -367,6 +367,19 @@ async function executeGenericWebTask(
     let sessionRef = executionContext?.sessionRef ?? request.input.sessionRef
     let restoredMessages: ReturnType<typeof sanitizeRestoredMessagesForResume> | undefined
     try {
+      const recoveryRequested = executionContext?.recoveryMode !== undefined
+      if (recoveryRequested
+        && (executionContext.recoveryMode !== 'read_only_reobserve/v1'
+          || host.durableSession !== true
+          || !host.restoredSession
+          || host.readOnlyAuthority !== true)) {
+        throw new Error(
+          'Generic recovery requires a durable restored session and explicit read-only authority.',
+        )
+      }
+      if (host.restoredSession && !recoveryRequested) {
+        throw new Error('A restored generic session requires an explicit recovery mode.')
+      }
       if (host.durableSession) {
         const store = new FileSessionStore({
           rootDir: join(config.trace.outDir, 'sessions'),
@@ -393,9 +406,15 @@ async function executeGenericWebTask(
           }
           const restored = await restoreSessionState({ session: current })
           restoredMessages = sanitizeRestoredMessagesForResume(restored.restoredMessages)
-          session = new FileSessionRecorder(store, current)
+          const reopened = await store.update(sessionId, {
+            status: 'created',
+            completedAt: undefined,
+            blockedReason: undefined,
+            error: undefined,
+          })
+          session = new FileSessionRecorder(store, reopened)
           sessionRef = expectedRef
-          await host.onSessionReady?.(current)
+          await host.onSessionReady?.(reopened)
         } else {
           const created = await store.create({
             sessionId,
@@ -423,6 +442,10 @@ async function executeGenericWebTask(
       if (!hasModelKey(config)) {
         const summary = 'Generic runtime is blocked because no model key is configured.'
         trace.record({ phase: 'boot', action: summary, status: 'blocked' })
+        await session?.updateStatus('blocked', {
+          blockedReason: summary,
+          error: undefined,
+        })
         const traceSummary = trace.finish()
         return {
           status: 'blocked',
@@ -486,6 +509,10 @@ async function executeGenericWebTask(
     } catch (error) {
       const summary = error instanceof Error ? error.message : String(error)
       trace.record({ phase: 'runtime', action: summary, status: 'error' })
+      await session?.updateStatus('failed', {
+        error: summary,
+        blockedReason: undefined,
+      }).catch(() => {})
       const traceSummary = trace.finish()
       return {
         status: 'failed',

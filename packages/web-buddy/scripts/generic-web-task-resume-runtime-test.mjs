@@ -13,6 +13,7 @@ import {
   FileSessionRecorder,
   FileSessionStore,
   restoreSessionState,
+  sanitizeRestoredMessagesForResume,
 } from '../dist/session/index.js'
 import { snapshotWebTaskInput } from '../dist/task/contracts.js'
 
@@ -52,6 +53,22 @@ try {
     args: { ref: 'e9' },
   })
   const restored = await restoreSessionState({ session })
+  const sanitizedMessages = sanitizeRestoredMessagesForResume(restored.restoredMessages)
+  assert.equal(
+    sanitizedMessages.some((message) => (
+      message.role === 'assistant'
+      && message.tool_calls?.some((call) => call.id === 'unsettled-write-call')
+    )),
+    false,
+    'an unsettled pre-restart write call remained replayable',
+  )
+  assert.equal(
+    sanitizedMessages.some((message) => (
+      message.role === 'tool' && message.tool_call_id === 'unsettled-write-call'
+    )),
+    false,
+    'an orphaned tool result remained replayable',
+  )
   const beforeTranscript = await readFile(session.transcriptPath, 'utf8')
   const config = loadConfig()
   config.model.apiKey = null
@@ -88,6 +105,22 @@ try {
       rules: [],
     },
   })
+  const runtimeRequest = (ref, execution = {}) => ({
+    schemaVersion: 'web-task-runtime-request/v1',
+    input: snapshot,
+    contextItems: [],
+    runtime: {
+      executionContext: {
+        schemaVersion: 'run-execution-context/v1',
+        runRevision: 5,
+        attempt: 2,
+        sessionRef: ref,
+        recoveryMode: 'read_only_reobserve/v1',
+        ...execution,
+      },
+    },
+    emit() {},
+  })
   let readySession
   const driver = createWebTaskRuntimeDriver({
     config,
@@ -97,21 +130,7 @@ try {
     readOnlyAuthority: true,
     onSessionReady(value) { readySession = value },
   })
-  const outcome = await driver.execute({
-    schemaVersion: 'web-task-runtime-request/v1',
-    input: snapshot,
-    contextItems: [],
-    runtime: {
-      executionContext: {
-        schemaVersion: 'run-execution-context/v1',
-        runRevision: 5,
-        attempt: 2,
-        sessionRef,
-        recoveryMode: 'read_only_reobserve/v1',
-      },
-    },
-    emit() {},
-  })
+  const outcome = await driver.execute(runtimeRequest(sessionRef))
   assert.equal(outcome.status, 'blocked', 'no-key recovery fixture should stop without browser writes')
   assert.deepEqual(outcome.sessionRef, sessionRef)
   assert.equal(readySession.sessionId, sessionId)
@@ -144,23 +163,52 @@ try {
     restoredSession: restored,
     readOnlyAuthority: false,
   })
-  const unsafeOutcome = await unsafeDriver.execute({
-    schemaVersion: 'web-task-runtime-request/v1',
-    input: snapshot,
-    contextItems: [],
-    runtime: {
-      executionContext: {
-        schemaVersion: 'run-execution-context/v1',
-        runRevision: 5,
-        attempt: 2,
-        sessionRef,
-        recoveryMode: 'read_only_reobserve/v1',
-      },
-    },
-    emit() {},
-  })
+  const unsafeOutcome = await unsafeDriver.execute(runtimeRequest(sessionRef))
   assert.equal(unsafeOutcome.status, 'failed')
-  assert.match(unsafeOutcome.summary, /read-only authority/)
+  assert.match(unsafeOutcome.summary, /durable restored session.*read-only authority/)
+
+  const missingSessionRef = {
+    ...sessionRef,
+    id: 'generic-resume-missing-restored-session',
+  }
+  const missingRestoredDriver = createWebTaskRuntimeDriver({
+    config,
+    durableSession: true,
+    sessionId: missingSessionRef.id,
+    readOnlyAuthority: true,
+  })
+  const missingRestored = await missingRestoredDriver.execute(runtimeRequest(missingSessionRef))
+  assert.equal(missingRestored.status, 'failed')
+  assert.match(missingRestored.summary, /durable restored session.*read-only authority/)
+  assert.equal(
+    await store.get(missingSessionRef.id),
+    undefined,
+    'recoveryMode without restored state created a replacement session',
+  )
+
+  const nonDurableDriver = createWebTaskRuntimeDriver({
+    config,
+    durableSession: false,
+    sessionId,
+    restoredSession: restored,
+    readOnlyAuthority: true,
+  })
+  const nonDurable = await nonDurableDriver.execute(runtimeRequest(sessionRef))
+  assert.equal(nonDurable.status, 'failed')
+  assert.match(nonDurable.summary, /durable restored session.*read-only authority/)
+
+  const missingRecoveryModeDriver = createWebTaskRuntimeDriver({
+    config,
+    durableSession: true,
+    sessionId,
+    restoredSession: restored,
+    readOnlyAuthority: true,
+  })
+  const missingRecoveryMode = await missingRecoveryModeDriver.execute(
+    runtimeRequest(sessionRef, { recoveryMode: undefined }),
+  )
+  assert.equal(missingRecoveryMode.status, 'failed')
+  assert.match(missingRecoveryMode.summary, /explicit recovery mode/)
 
   console.log('generic-web-task-resume-runtime-test: PASS')
 } finally {

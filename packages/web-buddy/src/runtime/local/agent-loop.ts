@@ -101,6 +101,7 @@ import {
   type CompletionFormState,
   type ContextItem,
   type EvidenceRef,
+  type OwnerScope,
   type SensitiveActionKind,
   type TaskContract,
   type TaskPolicy,
@@ -186,6 +187,7 @@ export interface AgentLoopInput {
   taskType?: WebBuddyTaskType
   taskContract?: TaskContract
   taskPolicy?: TaskPolicy
+  ownerScope?: OwnerScope
   llm: LlmGateway
   registry: ToolRegistry
   ctx: ToolContext
@@ -454,6 +456,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       runId,
       revision,
       sessionId: session?.session.sessionId ?? ctx.sessionId,
+      ownerScope: input.ownerScope,
       store: toolResultStore,
     })
     for (const artifact of assembled.slice(completionArtifacts.length)) {

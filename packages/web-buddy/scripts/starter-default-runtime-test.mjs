@@ -104,7 +104,12 @@ try {
   assert.equal(research.status, 'completed', research.summary)
   assert(research.evidence.some((item) => item.kind === 'page' && item.origin === 'web'))
 
-  const comparison = await runWebTask(createComparisonStarter({
+  const ownerScope = {
+    schemaVersion: 'owner-scope/v1',
+    tenantId: 'tenant-starter-e2e',
+    userId: 'user-starter-e2e',
+  }
+  const comparisonInput = createComparisonStarter({
     schemaVersion: 'comparison-starter/v1',
     goal: 'COMPARISON_STARTER_E2E: compare the supplied plans.',
     runId: 'starter-comparison-e2e',
@@ -112,11 +117,15 @@ try {
       { schemaVersion: 'comparison-option/v1', id: 'basic', label: 'Basic', facts: { price: 10, support: 'email' } },
       { schemaVersion: 'comparison-option/v1', id: 'pro', label: 'Pro', facts: { price: 25, support: 'priority' } },
     ],
-  }))
+  })
+  comparisonInput.ownerScope = ownerScope
+  const comparison = await runWebTask(comparisonInput)
   assert.equal(comparison.status, 'completed', comparison.summary)
+  assert.deepEqual(comparison.ownerScope, ownerScope)
   assert.equal(comparison.artifacts.length, 1)
   assert.equal(comparison.artifacts[0].kind, 'comparison_report')
   assert.equal(comparison.artifacts[0].payloadSchemaVersion, 'comparison-report/v1')
+  assert.deepEqual(comparison.artifacts[0].ownerScope, ownerScope)
 
   const formEvents = []
   const formInput = createFormDraftStarter({

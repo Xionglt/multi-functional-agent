@@ -70,6 +70,11 @@ assert.equal(evaluateCompletionContract({
 const root = await mkdtemp(join(tmpdir(), 'web-buddy-runtime-assembly-'))
 try {
   const store = new FileToolResultStore({ rootDir: root })
+  const ownerScope = {
+    schemaVersion: 'owner-scope/v1',
+    tenantId: 'tenant-runtime-assembly',
+    userId: 'user-runtime-assembly',
+  }
   const artifacts = await assembleCompletionArtifacts({
     goal: 'Compare options.',
     summary: 'Option A is less expensive.',
@@ -88,12 +93,14 @@ try {
     runId: 'runtime-assembly-run',
     revision: 0,
     sessionId: 'runtime-assembly-session',
+    ownerScope,
     store,
     now: () => new Date('2026-07-21T00:00:00.000Z'),
   })
   assert.equal(artifacts.length, 1)
   assert.equal(artifacts[0].kind, 'comparison_report')
   assert.match(artifacts[0].producer.id, /^result-assembler:/)
+  assert.deepEqual(artifacts[0].ownerScope, ownerScope)
 
   const memoryItems = await retrieveLifecycleMemoryContext({
     service: {

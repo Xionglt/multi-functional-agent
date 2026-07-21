@@ -564,6 +564,7 @@ async function executeGenericWebTask(
         contextItems: runtimeContextItems,
         taskContract: request.input.contract,
         taskPolicy: request.input.policy,
+        ownerScope: request.input.ownerScope,
         llm,
         registry: new ToolRegistry(createLocalTools(genericDefs)),
         ctx: {

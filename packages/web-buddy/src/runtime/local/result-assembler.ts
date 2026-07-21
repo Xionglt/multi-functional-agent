@@ -1,4 +1,4 @@
-import type { ArtifactRef, ContextItem, EvidenceRef, TaskContract } from '../../task/contracts.js'
+import type { ArtifactRef, ContextItem, EvidenceRef, OwnerScope, TaskContract } from '../../task/contracts.js'
 import type { ToolResultStore } from '../../tools/tool-result-store.js'
 
 export interface ResultAssemblerInput {
@@ -11,6 +11,7 @@ export interface ResultAssemblerInput {
   runId: string
   revision: number
   sessionId: string
+  ownerScope?: OwnerScope
   store: ToolResultStore
   now?: () => Date
 }
@@ -90,6 +91,7 @@ export async function assembleCompletionArtifacts(input: ResultAssemblerInput): 
       trust: 'derived_untrusted',
       sensitivity: stored.sensitivity,
       retention: { scope: 'run', deleteWithSession: true },
+      ...(input.ownerScope ? { ownerScope: structuredClone(input.ownerScope) } : {}),
       binding: { runId: input.runId, revision: input.revision },
       requiresMainWorkflowVerification: false,
       authoritativeCompletionEvidence: true,

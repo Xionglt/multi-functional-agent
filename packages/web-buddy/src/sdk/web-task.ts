@@ -4,13 +4,17 @@ import { loadConfig, hasModelKey, type AgentConfig } from './config.js'
 import { TraceRecorder } from './trace.js'
 import { browserOpen } from '../browser/open.js'
 import { sessionManager } from '../session/manager.js'
-import { runAgentLoop } from '../runtime/local/agent-loop.js'
+import { AgentRuntime } from '../agent/agent-runtime.js'
 import { ToolRegistry } from '../runtime/local/tool-registry.js'
 import { createLocalTools } from '../tools/local-adapter.js'
 import { listLocalToolDefs } from '../tools/catalog.js'
 import { emptyRunMetrics } from '../metrics/schema.js'
 import { generateAndWriteMetrics } from '../metrics/writer.js'
-import type { AgentRunController } from '../kernel/run-controller.js'
+import {
+  createAgentRunController,
+  type AgentKernelStatus,
+  type AgentRunController,
+} from '../kernel/run-controller.js'
 import {
   FileSessionRecorder,
   FileSessionStore,
@@ -83,6 +87,7 @@ export interface WebTaskExecutionHost {
   readOnlyAuthority?: boolean
   onSessionReady?: (session: AgentSession) => void | Promise<void>
   persistenceSanitizer?: (value: unknown) => unknown
+  agentRuntime?: Pick<AgentRuntime, 'run'>
 }
 
 export async function runWebTask(input: WebTaskInput): Promise<WebTaskResult> {
@@ -458,7 +463,8 @@ async function executeGenericWebTask(
         }
       }
       const genericDefs = listGenericWebTaskToolDefs(host.readOnlyAuthority === true)
-      const loop = await runAgentLoop({
+      const runtime = host.agentRuntime ?? new AgentRuntime()
+      const loop = await runtime.run({
         goal: request.input.goal.instruction,
         contextItems: request.contextItems,
         taskContract: request.input.contract,
@@ -473,8 +479,7 @@ async function executeGenericWebTask(
         allowFinalSubmit: false,
         session,
         restoredMessages,
-        abortSignal: host.controller?.signal,
-        shouldPause: () => host.controller?.pauseRequested ?? false,
+        controller: createRuntimeController(host.controller),
         persistenceSanitizer: host.persistenceSanitizer,
         onEvent: (event) => request.emit({
           type: 'runtime_event',
@@ -483,6 +488,13 @@ async function executeGenericWebTask(
           data: { step: event.step, level: event.level, message: event.message },
         }),
       })
+      if (loop.status === 'failed') {
+        trace.record({ phase: 'runtime', action: loop.summary, status: 'error' })
+        await session?.updateStatus('failed', {
+          error: loop.summary,
+          blockedReason: undefined,
+        })
+      }
       const traceSummary = trace.finish()
       const evidence = (loop.evidence ?? []).map((item) => ({
         ...item,
@@ -492,9 +504,11 @@ async function executeGenericWebTask(
         },
       }))
       return {
-        status: host.controller?.signal.aborted
+        status: host.controller?.signal.aborted || loop.status === 'aborted'
           ? 'cancelled'
-          : loop.paused || loop.blocked
+          : loop.status === 'failed'
+            ? 'failed'
+            : loop.paused || loop.blocked
             ? 'blocked'
             : loop.done
               ? 'completed'
@@ -526,6 +540,38 @@ async function executeGenericWebTask(
     } finally {
       await sessionManager.close(sessionId).catch(() => {})
     }
+}
+
+function createRuntimeController(
+  external?: Pick<AgentRunController, 'signal' | 'pauseRequested'>,
+): AgentRunController {
+  if (!external) return createAgentRunController()
+  let status: AgentKernelStatus = 'idle'
+  let reason: string | undefined
+  let pauseRequested = false
+  return {
+    get signal() { return external.signal },
+    get status() { return status },
+    get reason() { return reason },
+    get pauseRequested() { return pauseRequested || external.pauseRequested },
+    abort(value = 'Abort requested.') {
+      status = 'aborted'
+      reason = value
+    },
+    requestPause(value = 'Pause requested.') { pauseRequested = true; reason = value },
+    clearPauseRequest() { pauseRequested = false; reason = undefined },
+    markRunning() {
+      if (status !== 'aborted') { status = 'running'; reason = undefined }
+    },
+    markBlocked(value) { if (status !== 'aborted') { status = 'blocked'; reason = value } },
+    markCompleted() { if (status !== 'aborted') { status = 'completed'; reason = undefined } },
+    markFailed(value) {
+      if (status !== 'aborted') {
+        status = 'failed'
+        reason = value instanceof Error ? value.message : value
+      }
+    },
+  }
 }
 
 function metricsFor(trace: TraceRecorder, config: AgentConfig, _tracePath: string) {

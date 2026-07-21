@@ -37,22 +37,29 @@ export class AgentRuntime {
       taskType: input.taskType,
       taskContract: input.taskContract,
       taskPolicy: input.taskPolicy,
+      permissionMode: input.permissionMode,
+      allowFinalSubmit: input.allowFinalSubmit,
       session: input.session,
+      restoredMessages: input.restoredMessages,
+      persistenceSanitizer: input.persistenceSanitizer,
       controller: input.controller,
     })
 
     return {
       schemaVersion: 'agent-runtime-result/v1',
       runtime: 'local-agent-loop',
+      status: kernelResult.status,
       steps: kernelResult.steps,
       toolCalls: kernelResult.toolCalls,
       done: kernelResult.done,
       blocked: kernelResult.blocked,
+      ...(kernelResult.paused !== undefined ? { paused: kernelResult.paused } : {}),
       summary: kernelResult.summary,
       stopReason: kernelResult.status === 'aborted'
         ? 'aborted'
         : this.stopConditions.inferStopReason(kernelResult, { maxSteps: input.maxSteps }),
       ...(kernelResult.workflowState ? { workflowState: kernelResult.workflowState } : {}),
+      ...(kernelResult.evidence ? { evidence: kernelResult.evidence } : {}),
     }
   }
 }

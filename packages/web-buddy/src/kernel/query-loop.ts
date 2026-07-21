@@ -1,6 +1,6 @@
 import type { AgentRuntimeEvent, AgentRuntimeLlm, AgentSafetyMode, AgentStopReason } from '../agent/types.js'
 import type { HumanGate } from '../sdk/human.js'
-import type { LlmGateway } from '../sdk/llm.js'
+import type { ChatMessage, LlmGateway } from '../sdk/llm.js'
 import type { PermissionMode } from '../permission/index.js'
 import type { LegacyProfileInput, ProfileStore, StructuredProfileInput } from '../context/profile-store.js'
 import type { SessionRecorder } from '../session/index.js'
@@ -21,7 +21,7 @@ import {
   type TurnStateSnapshot,
 } from './turn-state.js'
 import { createTokenBudgetSnapshot, type TokenBudgetSnapshot } from './token-budget.js'
-import type { ContextItem, TaskContract, TaskPolicy } from '../task/contracts.js'
+import type { ContextItem, EvidenceRef, TaskContract, TaskPolicy } from '../task/contracts.js'
 
 export interface QueryLoopInput {
   goal: string
@@ -46,6 +46,8 @@ export interface QueryLoopInput {
   permissionMode?: PermissionMode
   allowFinalSubmit?: boolean
   session?: SessionRecorder
+  restoredMessages?: ChatMessage[]
+  persistenceSanitizer?: (value: unknown) => unknown
   controller?: AgentRunController
 }
 
@@ -58,8 +60,10 @@ export interface AgentKernelResult {
   toolCalls: number
   done: boolean
   blocked: boolean
+  paused?: boolean
   summary: string
   workflowState?: WorkflowState
+  evidence?: EvidenceRef[]
   turnState?: TurnStateSnapshot
   tokenBudget?: TokenBudgetSnapshot
 }
@@ -103,6 +107,8 @@ export class QueryLoop {
         permissionMode: input.permissionMode,
         allowFinalSubmit: input.allowFinalSubmit,
         session: input.session,
+        restoredMessages: input.restoredMessages,
+        persistenceSanitizer: input.persistenceSanitizer,
         abortSignal: controller.signal,
         shouldPause: () => controller.pauseRequested,
       })
@@ -126,8 +132,10 @@ export class QueryLoop {
         toolCalls: loopResult.toolCalls,
         done: loopResult.done,
         blocked: loopResult.blocked,
+        ...(loopResult.paused !== undefined ? { paused: loopResult.paused } : {}),
         summary: loopResult.summary,
         ...(loopResult.workflowState ? { workflowState: loopResult.workflowState } : {}),
+        ...(loopResult.evidence ? { evidence: loopResult.evidence } : {}),
         turnState,
         tokenBudget: createTokenBudgetSnapshot(),
       }

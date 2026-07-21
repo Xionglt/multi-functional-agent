@@ -5,6 +5,8 @@ import type {
 } from '../agent/types.js'
 import type { WebBuddyTaskType } from '../workflow/completion-gate.js'
 import type { HumanGate } from '../sdk/human.js'
+import type { ChatMessage } from '../sdk/llm.js'
+import type { PermissionMode } from '../permission/index.js'
 import type { LegacyProfileInput, ProfileStore, StructuredProfileInput } from '../context/profile-store.js'
 import type { SessionRecorder } from '../session/index.js'
 import { ToolRegistry, type ToolContext } from '../runtime/local/tool-registry.js'
@@ -38,7 +40,11 @@ export interface AgentKernelInput {
   taskType?: WebBuddyTaskType
   taskContract?: TaskContract
   taskPolicy?: TaskPolicy
+  permissionMode?: PermissionMode
+  allowFinalSubmit?: boolean
   session?: SessionRecorder
+  restoredMessages?: ChatMessage[]
+  persistenceSanitizer?: (value: unknown) => unknown
   controller?: AgentRunController
 }
 

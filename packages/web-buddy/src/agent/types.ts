@@ -2,7 +2,8 @@ import type { ContextRecentAction } from '../context/types.js'
 import type { FieldPlan } from '../fill/field-plan.js'
 import type { FillLedgerSummary } from '../fill/fill-ledger.js'
 import type { KernelEvent } from '../kernel/kernel-events.js'
-import type { AgentRunController } from '../kernel/run-controller.js'
+import type { AgentKernelStatus, AgentRunController } from '../kernel/run-controller.js'
+import type { PermissionMode } from '../permission/index.js'
 import type { HumanGate } from '../sdk/human.js'
 import type { ChatCompletion, ChatMessage, ChatOptions } from '../sdk/llm.js'
 import type { LegacyProfileInput, ProfileStore, StructuredProfileInput } from '../context/profile-store.js'
@@ -12,7 +13,7 @@ import type { TaskState } from '../task/task-state.js'
 import type { RunMemory } from '../context/run-memory.js'
 import type { WebBuddyTaskType } from '../workflow/completion-gate.js'
 import type { WorkflowState } from '../workflow/workflow-state.js'
-import type { ContextItem, TaskContract, TaskPolicy } from '../task/contracts.js'
+import type { ContextItem, EvidenceRef, TaskContract, TaskPolicy } from '../task/contracts.js'
 
 export type AgentSafetyMode = 'guarded' | 'raw'
 
@@ -55,8 +56,16 @@ export interface AgentRuntimeInput {
   taskType?: WebBuddyTaskType
   taskContract?: TaskContract
   taskPolicy?: TaskPolicy
+  /** User-facing permission profile for deciding which gated actions can auto-allow. */
+  permissionMode?: PermissionMode
+  /** Explicit future switch for final-submit automation. Defaults false. */
+  allowFinalSubmit?: boolean
   /** Optional append-only session recorder for resumable runtime state. */
   session?: SessionRecorder
+  /** Chat transcript restored from session transcript and prepended to the next model call. */
+  restoredMessages?: ChatMessage[]
+  /** Trusted write-time sanitizer supplied by an embedding service secret provider. */
+  persistenceSanitizer?: (value: unknown) => unknown
   /** Optional kernel-level run controller for abort/pause/status integration. */
   controller?: AgentRunController
 }
@@ -64,13 +73,16 @@ export interface AgentRuntimeInput {
 export interface AgentRuntimeResult {
   schemaVersion: 'agent-runtime-result/v1'
   runtime: 'local-agent-loop'
+  status: AgentKernelStatus
   steps: number
   toolCalls: number
   done: boolean
   blocked: boolean
+  paused?: boolean
   summary: string
   stopReason: AgentStopReason
   workflowState?: WorkflowState
+  evidence?: EvidenceRef[]
 }
 
 export interface PromptAssemblerInput {

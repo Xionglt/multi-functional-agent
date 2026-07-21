@@ -33,6 +33,7 @@ const research = sdk.createResearchStarter({
 const researchSnapshot = sdk.snapshotWebTaskInput(research)
 assert.equal(researchSnapshot.schemaVersion, 'web-task-input-snapshot/v1')
 assert.equal('driver' in (research.runtime ?? {}), false)
+assert.deepEqual(research.contract.requiredEvidence?.[0]?.origins, ['web'])
 
 const comparison = sdk.createComparisonStarter({
   schemaVersion: 'comparison-starter/v1',
@@ -60,6 +61,11 @@ const form = sdk.createFormDraftStarter({
 })
 assert(form.contract.criteria.some((criterion) => (
   criterion.kind === 'action_boundary' && criterion.outcome === 'not_performed'
+)))
+assert(form.policy.rules.some((rule) => (
+  rule.decision === 'ask'
+  && rule.actionKinds.includes('type_or_paste')
+  && rule.destinationOrigins?.includes('https://example.com')
 )))
 assert.throws(
   () => sdk.createFormDraftStarter({

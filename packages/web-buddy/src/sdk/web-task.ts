@@ -43,6 +43,14 @@ import {
   type WebTaskRuntimeOutcome,
 } from '../task/contracts.js'
 import { join } from 'node:path'
+import { ActionLedger, type ActionLedgerEntry } from '../task/action-ledger.js'
+import {
+  assembleRuntimeProfile,
+  type RuntimeAssembly,
+} from '../runtime/local/runtime-assembler.js'
+import type { AsyncTaskRuntime } from '../agents/async-task-runtime.js'
+import { PermissionEngine } from '../permission/permission-engine.js'
+import { loadPersistentPermissionRules } from '../permission/persistent-rules.js'
 
 export type {
   ActionBinding,
@@ -83,6 +91,24 @@ export interface WebTaskExecutionHost {
   readOnlyAuthority?: boolean
   onSessionReady?: (session: AgentSession) => void | Promise<void>
   persistenceSanitizer?: (value: unknown) => unknown
+  memoryContextProvider?: (input: WebTaskMemoryContextRequest) => Promise<ContextItem[]>
+  asyncTaskRuntimeFactory?: (input: WebTaskAsyncRuntimeFactoryInput) => AsyncTaskRuntime | Promise<AsyncTaskRuntime>
+}
+
+export interface WebTaskMemoryContextRequest {
+  input: Parameters<WebTaskRuntimeDriver['execute']>[0]['input']
+  sessionId: string
+  runId: string
+  revision: number
+}
+
+export interface WebTaskAsyncRuntimeFactoryInput {
+  input: Parameters<WebTaskRuntimeDriver['execute']>[0]['input']
+  session: SessionRecorder
+  config: AgentConfig
+  llm: LlmGateway
+  trace: TraceRecorder
+  assembly: RuntimeAssembly
 }
 
 export async function runWebTask(input: WebTaskInput): Promise<WebTaskResult> {
@@ -226,6 +252,8 @@ export async function runWebTask(input: WebTaskInput): Promise<WebTaskResult> {
     summary,
     evidence: outcome.evidence,
     artifacts: outcome.artifacts,
+    ...(outcome.formState ? { formState: outcome.formState } : {}),
+    ...(outcome.actions ? { actions: outcome.actions } : {}),
     metrics: outcome.metrics,
     ...(outcome.sessionRef ?? executionSessionRef ? { sessionRef: outcome.sessionRef ?? executionSessionRef } : {}),
     ...(outcome.checkpointRef ? { checkpointRef: outcome.checkpointRef } : {}),
@@ -348,12 +376,19 @@ async function executeGenericWebTask(
   host: WebTaskExecutionHost,
 ): Promise<WebTaskRuntimeOutcome> {
     const config = host.config ?? loadConfig()
+    const runtimeAssembly = assembleRuntimeProfile({
+      task: request.input,
+      config,
+      durableSession: host.durableSession,
+      hasLifecycleMemoryProvider: Boolean(host.memoryContextProvider),
+      hasAsyncRuntimeFactory: Boolean(host.asyncTaskRuntimeFactory),
+    })
     applyGenericBrowserEnv(config, request.runtime, request.input.runId)
     const trace = new TraceRecorder(request.runtime?.traceOutDir ?? config.trace.outDir, {
       runId: request.input.runId,
       source: 'sdk',
       scenario: request.input.goal.scenario ?? 'generic-web-task',
-      profile: 'generic',
+      profile: runtimeAssembly.profileId,
       goal: request.input.goal.instruction,
       sanitize: host.persistenceSanitizer,
     })
@@ -366,11 +401,15 @@ async function executeGenericWebTask(
     let session: SessionRecorder | undefined
     let sessionRef = executionContext?.sessionRef ?? request.input.sessionRef
     let restoredMessages: ReturnType<typeof sanitizeRestoredMessagesForResume> | undefined
+    const actionLedger = new ActionLedger()
+    const monitoredActionKinds = request.input.contract.criteria.flatMap((criterion) => (
+      criterion.kind === 'action_boundary' ? criterion.actionKinds : []
+    ))
     try {
       const recoveryRequested = executionContext?.recoveryMode !== undefined
       if (recoveryRequested
         && (executionContext.recoveryMode !== 'read_only_reobserve/v1'
-          || host.durableSession !== true
+          || runtimeAssembly.durableSession !== true
           || !host.restoredSession
           || host.readOnlyAuthority !== true)) {
         throw new Error(
@@ -380,7 +419,7 @@ async function executeGenericWebTask(
       if (host.restoredSession && !recoveryRequested) {
         throw new Error('A restored generic session requires an explicit recovery mode.')
       }
-      if (host.durableSession) {
+      if (runtimeAssembly.durableSession) {
         const store = new FileSessionStore({
           rootDir: join(config.trace.outDir, 'sessions'),
           sanitize: host.persistenceSanitizer,
@@ -435,9 +474,48 @@ async function executeGenericWebTask(
           await host.onSessionReady?.(created)
         }
       }
+      const recordBootstrapAction = async (entry: ActionLedgerEntry) => {
+        trace.agentTrace?.recordEvent('action_ledger_updated', { entry })
+        await session?.event({
+          type: 'action_ledger_updated',
+          toolCallId: entry.actionId,
+          message: `${entry.actionKind}: ${entry.status}`,
+          data: { entry },
+        })
+      }
+      let runtimeContextItems = [...request.contextItems]
+      if (host.memoryContextProvider) {
+        const memoryItems = await host.memoryContextProvider({
+          input: request.input,
+          sessionId,
+          runId: request.input.runId,
+          revision: request.input.revision,
+        })
+        for (const item of memoryItems) validateContextItem(item)
+        runtimeContextItems = [...runtimeContextItems, ...memoryItems].filter((item) => isContextItemEligible(item))
+        const ids = runtimeContextItems.map((item) => item.id)
+        if (new Set(ids).size !== ids.length) {
+          throw new Error('Runtime memory context produced duplicate ContextItem ids.')
+        }
+        trace.agentTrace?.recordEvent('memory_retrieved', {
+          source: 'memory_lifecycle',
+          itemCount: memoryItems.length,
+        })
+      }
       if (request.input.startUrl) {
+        const actionId = `runtime-bootstrap:navigate:${request.input.runId}`
+        await recordBootstrapAction(actionLedger.propose({
+          actionId,
+          actionKind: 'navigate',
+          toolName: 'browser_open',
+        }))
+        await recordBootstrapAction(actionLedger.authorize(actionId, 'User supplied startUrl.'))
         const opened = await browserOpen({ url: request.input.startUrl, sessionId, waitUntil: 'domcontentloaded' })
-        if (!opened.ok) throw new Error(opened.error.message)
+        if (!opened.ok) {
+          await recordBootstrapAction(actionLedger.fail(actionId, opened.error.message))
+          throw new Error(opened.error.message)
+        }
+        await recordBootstrapAction(actionLedger.perform(actionId, 'Initial navigation succeeded.'))
       }
       if (!hasModelKey(config)) {
         const summary = 'Generic runtime is blocked because no model key is configured.'
@@ -453,26 +531,68 @@ async function executeGenericWebTask(
           evidence: [],
           artifacts: [],
           metrics: metricsFor(trace, config, traceSummary.tracePath),
-          actions: [{ actionKind: 'submit', outcome: 'not_performed' }],
+          actions: actionLedger.outcomes(monitoredActionKinds),
           ...(sessionRef ? { sessionRef } : {}),
         }
       }
       const genericDefs = listGenericWebTaskToolDefs(host.readOnlyAuthority === true)
+      const persistentPermissionRules = runtimeAssembly.memory.mode === 'legacy_local'
+        ? await loadPersistentPermissionRules(config.memory.permissionRulesPath)
+        : []
+      const asyncTaskRuntime = runtimeAssembly.asyncTasks.eligible
+        && host.asyncTaskRuntimeFactory
+        && session
+        ? await host.asyncTaskRuntimeFactory({
+            input: request.input,
+            session,
+            config,
+            llm,
+            trace,
+            assembly: runtimeAssembly,
+          })
+        : undefined
+      if (runtimeAssembly.asyncTasks.eligible && !asyncTaskRuntime) {
+        trace.agentTrace?.recordEvent('runtime_capability_degraded', {
+          capability: 'async_tasks',
+          reason: host.asyncTaskRuntimeFactory
+            ? 'A durable session was unavailable.'
+            : 'No trusted asyncTaskRuntimeFactory was supplied.',
+        })
+      }
       const loop = await runAgentLoop({
         goal: request.input.goal.instruction,
-        contextItems: request.contextItems,
+        contextItems: runtimeContextItems,
         taskContract: request.input.contract,
         taskPolicy: request.input.policy,
         llm,
         registry: new ToolRegistry(createLocalTools(genericDefs)),
-        ctx: { sessionId, highlight: config.browser.visualHighlight, trace },
+        ctx: {
+          sessionId,
+          highlight: config.browser.visualHighlight,
+          trace,
+          ...(asyncTaskRuntime ? { asyncTaskRuntime } : {}),
+        },
         gate: host.gate ?? (config.human.mode === 'auto' ? new AutoHumanGate() : new CliHumanGate()),
         maxSteps: request.runtime?.maxSteps ?? config.agent.maxSteps,
         safetyMode: 'guarded',
         permissionMode: config.human.permissionMode,
+        permissionEngine: new PermissionEngine({
+          permissionMode: config.human.permissionMode,
+          allowFinalSubmit: false,
+          persistentRules: persistentPermissionRules,
+        }),
         allowFinalSubmit: false,
+        taskType: runtimeAssembly.taskType,
+        toolOrchestration: runtimeAssembly.toolOrchestration,
+        actionLedger,
+        ...(runtimeAssembly.memory.mode === 'legacy_local' ? {
+          persistentAnswerStore: { path: config.memory.answerStorePath },
+          persistentPermissionRules: { path: config.memory.permissionRulesPath },
+          memdir: { path: config.memory.memdirPath },
+        } : {}),
         session,
         restoredMessages,
+        restoredAsyncTaskPromptAttachments: host.restoredSession?.asyncTaskPromptAttachments,
         abortSignal: host.controller?.signal,
         shouldPause: () => host.controller?.pauseRequested ?? false,
         persistenceSanitizer: host.persistenceSanitizer,
@@ -491,6 +611,13 @@ async function executeGenericWebTask(
           ...(sessionRef ? { sessionRef } : {}),
         },
       }))
+      const artifacts = (loop.artifacts ?? []).map((item) => ({
+        ...item,
+        binding: {
+          ...item.binding,
+          ...(sessionRef ? { sessionRef } : {}),
+        },
+      }))
       return {
         status: host.controller?.signal.aborted
           ? 'cancelled'
@@ -501,9 +628,10 @@ async function executeGenericWebTask(
               : 'failed',
         summary: loop.summary,
         evidence,
-        artifacts: [],
+        artifacts,
+        ...(loop.formState ? { formState: loop.formState } : {}),
         metrics: metricsFor(trace, config, traceSummary.tracePath),
-        actions: [{ actionKind: 'submit', outcome: 'not_performed' }],
+        actions: loop.actions ?? actionLedger.outcomes(monitoredActionKinds),
         ...(sessionRef ? { sessionRef } : {}),
       }
     } catch (error) {
@@ -520,7 +648,7 @@ async function executeGenericWebTask(
         evidence: [],
         artifacts: [],
         metrics: metricsFor(trace, config, traceSummary.tracePath),
-        actions: [{ actionKind: 'submit', outcome: 'not_performed' }],
+        actions: actionLedger.outcomes(monitoredActionKinds),
         ...(sessionRef ? { sessionRef } : {}),
       }
     } finally {

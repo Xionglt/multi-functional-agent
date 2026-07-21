@@ -10,9 +10,11 @@ export {
   validatePolicyHookDecision,
 } from './task.js'
 export type {
+  ActionOutcome,
   ActionBinding,
   ArtifactRef,
   CheckpointRef,
+  CompletionFormState,
   CompletionCriterion,
   ContentOrigin,
   ContentSensitivity,

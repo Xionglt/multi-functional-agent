@@ -14,7 +14,13 @@ import type { WorkflowPhase, WorkflowState } from './workflow-state.js'
 import { actionableDialogPresent } from './actionable-dialog.js'
 import { evaluateTaskCompletion } from './task-completion.js'
 import { evaluateCompletionContract } from '../task/completion-contract.js'
-import type { ActionOutcome, ArtifactRef, EvidenceRef, TaskContract } from '../task/contracts.js'
+import type {
+  ActionOutcome,
+  ArtifactRef,
+  CompletionFormState,
+  EvidenceRef,
+  TaskContract,
+} from '../task/contracts.js'
 
 export type CompletionGateAction = 'allow' | 'block' | 'ignore' | 'reject'
 export type CompletionGateRecommendedStatus = 'completed' | 'blocked' | 'unchanged'
@@ -134,7 +140,7 @@ export class CompletionGate {
         revision,
         evidence: input.evidence ?? [],
         artifacts: input.artifacts ?? [],
-        formState: completionFormState(input),
+        formState: deriveCompletionFormState(input),
         actions: input.actions ?? [],
       })
       if (contractEvaluation.completed) {
@@ -276,7 +282,9 @@ export class CompletionGate {
 
 export const completionGate = new CompletionGate()
 
-function completionFormState(input: CompletionGateInput) {
+export function deriveCompletionFormState(
+  input: Pick<CompletionGateInput, 'formCoverage' | 'form' | 'workflowState' | 'page'>,
+): CompletionFormState {
   const coverage = input.formCoverage ?? input.form?.formCoverage ?? input.workflowState?.formCoverage
   const fields = input.form?.fields ?? []
   const required = fields.filter((field) => field.required && field.disabled !== true && field.readonly !== true)

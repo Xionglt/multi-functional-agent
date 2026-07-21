@@ -26,6 +26,7 @@ import {
 import { createAgentRunController, type AgentRunController } from '../kernel/run-controller.js'
 import {
   createFileMemoryLifecycle,
+  retrieveLifecycleMemoryContext,
   type MemoryLifecycleRecord,
   type MemoryLifecycleService,
 } from '../memory/index.js'
@@ -44,6 +45,7 @@ import { runJobApplicationAgent, type AgentEvent, type AgentRunResult, type RunO
 import {
   createWebTaskRuntimeDriver,
   runWebTask,
+  type WebTaskExecutionHost,
 } from '../sdk/web-task.js'
 import { sessionManager } from '../session/manager.js'
 import {
@@ -122,6 +124,8 @@ export interface WebControlServerOptions {
   serviceSecurity?: WebServiceSecurityOptions
   /** Test/embedding seam for runtime outcomes; runWebTask still owns validation and completion. */
   webTaskRuntimeDriver?: WebTaskRuntimeDriver
+  /** Trusted read-only async worker assembly for eligible research/comparison profiles. */
+  webTaskAsyncRuntimeFactory?: NonNullable<WebTaskExecutionHost['asyncTaskRuntimeFactory']>
 }
 
 export function createWebControlServer(options: WebControlServerOptions = {}) {
@@ -460,7 +464,24 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
           ? { restoredSession: launchOptions.restoredSession }
           : {}),
         readOnlyAuthority,
+        ...(options.webTaskAsyncRuntimeFactory
+          ? { asyncTaskRuntimeFactory: options.webTaskAsyncRuntimeFactory }
+          : {}),
         persistenceSanitizer: (value) => security.sanitize(value),
+        ...(running.ownerScope ? {
+          memoryContextProvider: async ({ input, sessionId, runId, revision }) => {
+            const service = memoryForOwnerScope(running.ownerScope!)
+            if (!service) return []
+            return retrieveLifecycleMemoryContext({
+              service,
+              ownerScope: running.ownerScope!,
+              query: input.goal.instruction,
+              runId,
+              revision,
+              sessionId,
+            })
+          },
+        } : {}),
         onSessionReady: async (session) => {
           await runService.attachSession(running.runId, {
             schemaVersion: 'session-ref/v1',
@@ -822,16 +843,16 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     return (await runService.get(runId, scope)) ?? created.record
   }
 
-  const memoryFor = (principal: ServicePrincipal): MemoryLifecycleService | undefined => {
-    if (principal.scope.kind !== 'tenant') return undefined
-    const key = serviceScopeKey(principal.scope)
+  const memoryForOwnerScope = (ownerScope: OwnerScope): MemoryLifecycleService | undefined => {
+    if (!ownerScope.tenantId || !ownerScope.userId) return undefined
+    const key = `tenant:${ownerScope.tenantId}:user:${ownerScope.userId}`
     let service = memories.get(key)
     if (!service) {
       service = createFileMemoryLifecycle({
         root: memoryRoot,
         actorScope: {
-          tenantId: principal.scope.tenantId,
-          userId: principal.scope.userId,
+          tenantId: ownerScope.tenantId,
+          userId: ownerScope.userId,
           runId: `service-${createHash('sha256').update(key).digest('hex').slice(0, 24)}`,
         },
       }).service
@@ -839,6 +860,15 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     }
     return service
   }
+  const memoryFor = (principal: ServicePrincipal): MemoryLifecycleService | undefined => (
+    principal.scope.kind === 'tenant'
+      ? memoryForOwnerScope({
+          schemaVersion: 'owner-scope/v1',
+          tenantId: principal.scope.tenantId,
+          userId: principal.scope.userId,
+        })
+      : undefined
+  )
 
   async function recoverStartupRuns(): Promise<void> {
     await recoveryService.recoverStartupRuns()

@@ -7,9 +7,11 @@ import {
   type WebTaskResult as InternalWebTaskResult,
 } from '../task/contracts.js'
 import type {
+  ActionOutcome,
   ActionBinding,
   ArtifactRef,
   CheckpointRef,
+  CompletionFormState,
   CompletionCriterion,
   ContentOrigin,
   ContentSensitivity,
@@ -150,9 +152,11 @@ export function validatePolicyHookDecision(value: unknown): asserts value is Pol
 }
 
 export type {
+  ActionOutcome,
   ActionBinding,
   ArtifactRef,
   CheckpointRef,
+  CompletionFormState,
   CompletionCriterion,
   ContentOrigin,
   ContentSensitivity,
@@ -200,6 +204,8 @@ function projectWebTaskResult(result: InternalWebTaskResult): WebTaskResult {
     summary: result.summary,
     evidence: structuredClone(result.evidence) as EvidenceRef[],
     artifacts: structuredClone(result.artifacts) as ArtifactRef[],
+    ...(result.formState ? { formState: structuredClone(result.formState) as CompletionFormState } : {}),
+    ...(result.actions ? { actions: structuredClone(result.actions) as ActionOutcome[] } : {}),
     metrics: projectRunMetrics(result.metrics),
     ...(result.sessionRef ? { sessionRef: structuredClone(result.sessionRef) as SessionRef } : {}),
     ...(result.checkpointRef ? { checkpointRef: structuredClone(result.checkpointRef) as CheckpointRef } : {}),

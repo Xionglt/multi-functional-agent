@@ -371,10 +371,10 @@ try {
   assert.equal(reused.status, 409, 'resolved approval cannot cross a second action')
 
   const html = await (await request(base, '/')).text()
-  assert.match(html, /Approval Inbox/)
-  assert.match(html, /Artifacts API/)
-  assert.match(html, /Pause/)
-  assert.match(html, /Service token/)
+  assert.match(html, /data-contract="approval-inbox"/)
+  assert.match(html, /id="artifactLink"/)
+  assert.match(html, /id="stopBtn"/)
+  assert.match(html, /id="serviceToken"/)
   assert.match(html, /authorization.*Bearer/)
   assert.doesNotMatch(html, /new EventSource\(/, 'authenticated SSE must not put tokens in query parameters')
 

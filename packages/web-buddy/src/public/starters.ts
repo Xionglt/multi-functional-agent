@@ -77,7 +77,7 @@ export function createResearchStarter(input: ResearchStarter): WebTaskInput {
         kinds: ['page'],
         minCount: 1,
         allowedAuthorities: ['main_runtime'],
-        origins: ['tool'],
+        origins: ['web'],
         independentlyObserved: true,
       }],
       sensitiveActions: denyWriteActions(),
@@ -130,6 +130,8 @@ export function createFormDraftStarter(input: FormDraftStarter): WebTaskInput {
   if (!Array.isArray(input.fields) || input.fields.length === 0) invalid('FormDraftStarter requires fields.')
   const capturedAt = validTimestamp(input.capturedAt ?? new Date().toISOString())
   const contextItems = input.fields.map((field, index) => formFieldContext(field, index, capturedAt))
+  const startUrl = httpUrl(input.startUrl)
+  const sensitiveActions = formDraftActions(new URL(startUrl).origin)
   return {
     schemaVersion: 'web-task-input/v1',
     goal: {
@@ -137,7 +139,7 @@ export function createFormDraftStarter(input: FormDraftStarter): WebTaskInput {
       scenario: 'form_draft',
       metadata: { draftOnly: true },
     },
-    startUrl: httpUrl(input.startUrl),
+    startUrl,
     contextItems,
     contract: {
       schemaVersion: 'web-task-contract/v1',
@@ -161,9 +163,13 @@ export function createFormDraftStarter(input: FormDraftStarter): WebTaskInput {
           outcome: 'not_performed',
         },
       ],
-      sensitiveActions: denyWriteActions(),
+      sensitiveActions,
     },
-    policy: denyWritePolicy(),
+    policy: {
+      schemaVersion: 'task-policy/v1',
+      defaultSensitiveAction: 'deny',
+      rules: sensitiveActions,
+    },
     ...(input.runId ? { runId: required(input.runId, 'runId') } : {}),
   }
 }
@@ -260,6 +266,20 @@ function denyWriteActions(): SensitiveActionRule[] {
     decision: 'deny',
     requireApprovalBinding: true,
   }]
+}
+
+function formDraftActions(destinationOrigin: string): SensitiveActionRule[] {
+  return [
+    {
+      id: 'starter-confirm-form-fill',
+      actionKinds: ['type_or_paste'],
+      decision: 'ask',
+      sourceSensitivities: ['public', 'internal', 'personal'],
+      destinationOrigins: [destinationOrigin],
+      requireApprovalBinding: true,
+    },
+    ...denyWriteActions(),
+  ]
 }
 
 function required(value: unknown, label: string): string {

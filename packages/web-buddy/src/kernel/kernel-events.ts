@@ -13,6 +13,7 @@ export type KernelEventType =
   | 'tool_result_artifact'
   | 'policy_evaluated'
   | 'permission_evaluated'
+  | 'action_ledger_updated'
   | 'approval_requested'
   | 'approval_resolved'
   | 'skill_resolved'

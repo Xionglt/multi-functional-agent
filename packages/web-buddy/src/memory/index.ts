@@ -49,3 +49,4 @@ export type {
   PolicyEnforcedMemoryWriter,
 } from './memory-write-policy.js'
 export * from './memory-lifecycle.js'
+export { retrieveLifecycleMemoryContext } from './context-provider.js'

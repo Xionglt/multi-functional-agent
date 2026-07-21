@@ -3,620 +3,967 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Web Agent Console</title>
+<title>Web Agent</title>
 <style>
   :root {
-    --bg: #f6f7f9;
+    --canvas: #f4f6f9;
     --surface: #ffffff;
-    --rail: #15171c;
-    --rail-2: #20232b;
-    --text: #1c2028;
-    --muted: #667085;
-    --soft: #e4e7ec;
-    --line: #d5d9e2;
-    --green: #1f8f5f;
-    --blue: #246bfe;
-    --amber: #b46b08;
-    --red: #c43e38;
-    --purple: #7047b8;
-    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", system-ui, sans-serif;
+    --surface-subtle: #f8fafc;
+    --rail: #edf1f6;
+    --ink: #172033;
+    --muted: #697386;
+    --faint: #98a2b3;
+    --line: #dce2ea;
+    --line-strong: #c9d2df;
+    --accent: #2557d6;
+    --accent-soft: #eaf0ff;
+    --teal: #087f78;
+    --teal-soft: #e7f6f4;
+    --amber: #a15c08;
+    --amber-soft: #fff4df;
+    --red: #b73935;
+    --red-soft: #fff0ef;
+    --violet: #6853b8;
+    --violet-soft: #f0edff;
+    --shadow: 0 18px 50px rgba(33, 47, 73, .08);
+    --sans: "Avenir Next", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    --mono: "SFMono-Regular", "Cascadia Code", "Roboto Mono", Consolas, monospace;
   }
+
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; }
-  body { background: var(--bg); color: var(--text); font: 13px/1.45 var(--sans); }
-  button, input, textarea, select { font: inherit; }
-  .app { min-height: 100vh; display: grid; grid-template-columns: 340px minmax(420px, 1fr) 390px; }
-  aside { background: var(--rail); color: #eef1f6; padding: 18px; overflow: auto; }
-  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
-  .mark { width: 24px; height: 24px; border-radius: 6px; background: linear-gradient(135deg, var(--green), var(--blue)); }
-  .brand h1 { font-size: 15px; margin: 0; font-weight: 680; letter-spacing: 0; }
-  .brand p { margin: 2px 0 0; color: #aeb6c5; font-size: 11px; }
-  .group { margin: 0 0 14px; }
-  .label { display: flex; justify-content: space-between; align-items: center; color: #b8c0cc; font-size: 11px; margin-bottom: 6px; }
-  .label span:last-child { color: #7f899a; font-family: var(--mono); }
-  input, textarea, select {
-    width: 100%;
-    border: 1px solid #343946;
-    background: var(--rail-2);
-    color: #f6f8fb;
-    border-radius: 6px;
-    padding: 8px 9px;
-    outline: none;
+  [hidden] { display: none !important; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background: var(--canvas);
+    color: var(--ink);
+    font: 14px/1.5 var(--sans);
+    -webkit-font-smoothing: antialiased;
   }
-  textarea { min-height: 116px; resize: vertical; }
-  input:focus, textarea:focus, select:focus { border-color: #6ea5ff; }
-  .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: #0f1116; padding: 4px; border-radius: 8px; border: 1px solid #303541; }
-  .seg.runtime { grid-template-columns: 1fr 1fr 1fr; }
-  .seg.preset { grid-template-columns: 1fr 1fr 1fr; }
-  .seg button { border: 0; border-radius: 6px; background: transparent; color: #aeb6c5; padding: 7px 8px; cursor: pointer; }
-  .seg button.on { background: #eef1f6; color: #111318; }
-  .group.is-disabled { opacity: .5; }
-  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .check { display: flex; gap: 8px; align-items: center; color: #b8c0cc; margin-top: 8px; }
-  .check input { width: auto; }
-  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 16px; }
-  .btn { border: 0; border-radius: 7px; padding: 10px 12px; font-weight: 650; cursor: pointer; }
-  .btn:disabled { opacity: .48; cursor: not-allowed; }
-  .primary { background: var(--green); color: white; grid-column: span 2; }
-  .secondary { background: #2b303a; color: #eef1f6; }
-  .danger { background: #3a2526; color: #ffb4ad; }
-  .continue { background: var(--blue); color: white; grid-column: span 2; display: none; }
-  main { min-width: 0; display: grid; grid-template-rows: 58px minmax(0, 1fr); }
-  .topbar {
-    background: var(--surface);
+  button, input, textarea { font: inherit; }
+  button { color: inherit; }
+  button, input, textarea, a { outline: none; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible {
+    box-shadow: 0 0 0 3px rgba(37, 87, 214, .2);
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .app {
+    min-height: 100vh;
+    display: grid;
+    grid-template:
+      "header header header" 68px
+      "history workspace inspect" minmax(0, 1fr)
+      / 252px minmax(470px, 1fr) 336px;
+  }
+
+  .appbar {
+    grid-area: header;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    padding: 0 22px;
+    background: rgba(255, 255, 255, .96);
     border-bottom: 1px solid var(--line);
+  }
+  .brand {
+    min-width: 230px;
+    display: flex;
+    align-items: center;
+    gap: 11px;
+  }
+  .agent-mark {
+    position: relative;
+    width: 31px;
+    height: 31px;
+    border: 1px solid #b9c5d7;
+    border-radius: 10px;
+    background: var(--surface);
+  }
+  .agent-mark::before,
+  .agent-mark::after {
+    content: "";
+    position: absolute;
+    border-radius: 999px;
+  }
+  .agent-mark::before {
+    inset: 6px;
+    border: 1px solid var(--accent);
+  }
+  .agent-mark::after {
+    width: 7px;
+    height: 7px;
+    top: 4px;
+    right: 4px;
+    background: var(--teal);
+    box-shadow: -14px 14px 0 var(--accent);
+  }
+  .brand-title {
+    font-size: 16px;
+    font-weight: 720;
+    letter-spacing: -.02em;
+  }
+  .brand-subtitle {
+    margin-top: 1px;
+    color: var(--muted);
+    font-size: 11px;
+  }
+
+  .service-connect {
+    flex: 1;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 8px;
+  }
+  .token-input {
+    width: min(300px, 31vw);
+    height: 36px;
+    border: 1px solid var(--line-strong);
+    border-radius: 9px;
+    padding: 0 11px;
+    background: var(--surface-subtle);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .token-input::placeholder { color: var(--faint); font-family: var(--sans); }
+  .connection-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--muted);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .connection-state::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--faint);
+  }
+  .connection-state.connected { color: var(--teal); }
+  .connection-state.connected::before { background: var(--teal); }
+  .connection-state.failed { color: var(--red); }
+  .connection-state.failed::before { background: var(--red); }
+
+  .btn {
+    min-height: 36px;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    padding: 8px 13px;
+    background: transparent;
+    font-weight: 680;
+    cursor: pointer;
+    transition: transform .16s ease, background .16s ease, border-color .16s ease;
+  }
+  .btn:hover:not(:disabled) { transform: translateY(-1px); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.primary { background: var(--accent); color: white; }
+  .btn.primary:hover:not(:disabled) { background: #1e49ba; }
+  .btn.secondary { border-color: var(--line-strong); background: var(--surface); }
+  .btn.secondary:hover:not(:disabled) { background: var(--surface-subtle); }
+  .btn.ghost { color: var(--muted); }
+  .btn.ghost:hover:not(:disabled) { background: var(--rail); color: var(--ink); }
+  .btn.danger { border-color: #e9c5c3; color: var(--red); background: var(--red-soft); }
+  .btn.small { min-height: 30px; padding: 5px 9px; border-radius: 7px; font-size: 12px; }
+
+  .history-pane {
+    grid-area: history;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 20px 14px 16px;
+    background: var(--rail);
+    border-right: 1px solid var(--line);
+  }
+  .section-kicker {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0 7px 10px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 740;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  .history-list {
+    min-height: 0;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .run-row {
+    width: 100%;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    padding: 10px;
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+  }
+  .run-row:hover { background: rgba(255, 255, 255, .62); }
+  .run-row.selected {
+    background: var(--surface);
+    border-color: var(--line-strong);
+    box-shadow: 0 5px 18px rgba(33, 47, 73, .06);
+  }
+  .run-row-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    align-items: center;
+  }
+  .run-row-title { font-size: 13px; font-weight: 680; }
+  .run-row-meta {
+    margin-top: 5px;
+    color: var(--muted);
+    font: 10px/1.45 var(--mono);
+    overflow-wrap: anywhere;
+  }
+  .mini-state {
+    flex: 0 0 auto;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: #e2e7ee;
+    color: var(--muted);
+    font-size: 10px;
+  }
+  .mini-state.running { color: var(--teal); background: var(--teal-soft); }
+  .mini-state.blocked { color: var(--amber); background: var(--amber-soft); }
+  .mini-state.failed { color: var(--red); background: var(--red-soft); }
+  .history-empty {
+    margin: 4px;
+    padding: 16px 10px;
+    color: var(--muted);
+    font-size: 12px;
+    text-align: center;
+  }
+  .runtime-info {
+    margin-top: auto;
+    padding: 14px 7px 0;
+    border-top: 1px solid var(--line-strong);
+  }
+  .runtime-info-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+  .runtime-info-value { margin-top: 4px; font: 11px/1.5 var(--mono); overflow-wrap: anywhere; }
+  .credential-note { margin-top: 4px; color: var(--muted); font-size: 11px; }
+
+  .workspace {
+    grid-area: workspace;
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    padding: 28px clamp(22px, 4vw, 52px) 40px;
+  }
+  .workspace-inner { width: min(860px, 100%); margin: 0 auto; }
+  .workspace-heading { margin-bottom: 18px; }
+  .eyebrow {
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 760;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+  }
+  .workspace-heading h1 {
+    margin: 5px 0 3px;
+    font-size: clamp(26px, 3vw, 38px);
+    line-height: 1.16;
+    letter-spacing: -.045em;
+    font-weight: 710;
+  }
+  .workspace-heading p { margin: 0; color: var(--muted); }
+
+  .composer {
+    overflow: hidden;
+    border: 1px solid var(--line-strong);
+    border-radius: 16px;
+    background: var(--surface);
+    box-shadow: var(--shadow);
+  }
+  .address-row {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 15px;
+    background: var(--surface-subtle);
+    border-bottom: 1px solid var(--line);
+  }
+  .browser-dots { display: flex; gap: 5px; }
+  .browser-dots span { width: 7px; height: 7px; border-radius: 50%; background: #c8d0dc; }
+  .browser-dots span:nth-child(2) { background: #aeb9c9; }
+  .browser-dots span:nth-child(3) { background: #8fa0b8; }
+  .url-input {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: var(--ink);
+    font: 13px/1.5 var(--mono);
+  }
+  .url-input::placeholder { color: var(--faint); }
+  .goal-wrap { padding: 18px 18px 12px; }
+  .field-label {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+    color: var(--ink);
+    font-size: 12px;
+    font-weight: 720;
+  }
+  .field-label span { color: var(--muted); font-weight: 500; }
+  .goal-input {
+    width: 100%;
+    min-height: 130px;
+    resize: vertical;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: var(--ink);
+    font-size: 15px;
+    line-height: 1.65;
+  }
+  .goal-input::placeholder { color: #929dad; }
+  .composer-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 12px 14px;
+    border-top: 1px solid var(--line);
+    background: #fbfcfe;
+  }
+  .run-options { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+  .run-options input { accent-color: var(--accent); }
+  .safety-note {
+    display: flex;
+    gap: 9px;
+    align-items: flex-start;
+    margin: 12px 3px 0;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .safety-icon {
+    flex: 0 0 auto;
+    width: 17px;
+    height: 17px;
+    border: 1px solid #9fb0c6;
+    border-radius: 50%;
+    color: #657995;
+    font: 700 11px/15px var(--mono);
+    text-align: center;
+  }
+
+  .activity {
+    margin-top: 28px;
+    border-top: 1px solid var(--line);
+  }
+  .activity-head {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 0 18px;
+    min-height: 58px;
   }
-  .status { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 999px; padding: 5px 10px; color: var(--muted); background: #fbfcfd; }
-  .status.running { color: var(--green); border-color: #b8dfca; background: #f0fbf5; }
-  .status.blocked { color: var(--amber); border-color: #eac486; background: #fff8eb; }
-  .status.failed { color: var(--red); border-color: #f0aca8; background: #fff3f2; }
-  .dot { width: 7px; height: 7px; border-radius: 999px; background: currentColor; }
-  .runid { font-family: var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .timeline { overflow: auto; padding: 14px 0; }
-  .empty { color: var(--muted); font-family: var(--mono); padding: 36px 22px; }
-  .event { display: grid; grid-template-columns: 86px 108px minmax(0, 1fr); gap: 10px; padding: 6px 18px; border-left: 3px solid transparent; }
-  .event:hover { background: #eef1f5; }
-  .event .time, .event .phase { font-family: var(--mono); color: var(--muted); font-size: 11px; }
-  .event .msg { white-space: pre-wrap; overflow-wrap: anywhere; }
-  .event.think { border-left-color: var(--purple); }
-  .event.risk { border-left-color: var(--amber); background: #fffaf0; }
-  .event.decision { border-left-color: var(--blue); background: #f3f7ff; }
-  .event.act { border-left-color: var(--blue); }
-  .event.observe { border-left-color: var(--green); }
-  .event.gate { border-left-color: var(--amber); background: #fff8eb; }
-  .event.warn { border-left-color: var(--amber); }
-  .event.error { border-left-color: var(--red); }
-  .event.done { border-left-color: var(--green); }
-  .inspect { background: var(--surface); border-left: 1px solid var(--line); overflow: auto; padding: 16px; }
-  .panel { margin-bottom: 18px; }
-  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0; color: var(--muted); margin: 0 0 8px; }
-  .kv { display: grid; grid-template-columns: 92px 1fr; gap: 6px 10px; font-size: 12px; }
-  .kv div:nth-child(odd) { color: var(--muted); }
-  .mono { font-family: var(--mono); overflow-wrap: anywhere; }
-  .span { border-top: 1px solid var(--soft); padding: 8px 0; }
-  .span-head { display: flex; gap: 6px; align-items: center; min-width: 0; }
-  .chip { font-family: var(--mono); font-size: 10px; border-radius: 4px; padding: 2px 5px; background: #edf0f5; color: #475467; }
-  .chip.llm_call { color: var(--purple); background: #f0ebff; }
-  .chip.mcp_tool_call, .chip.tool_call { color: var(--blue); background: #eaf1ff; }
-  .chip.skill_call { color: var(--green); background: #e8f7ef; }
-  .chip.runtime_event { color: var(--amber); background: #fff3d9; }
-  .span-name { font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .span-meta { color: var(--muted); margin-top: 4px; font-family: var(--mono); font-size: 11px; }
-  .filebox { border: 1px solid var(--soft); border-radius: 7px; padding: 8px; background: #fbfcfd; }
-  .hint { color: #99a3b3; font-size: 11px; margin-top: 5px; }
+  .activity-head h2 { margin: 0; font-size: 13px; letter-spacing: -.01em; }
+  .activity-spacer { flex: 1; }
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 9px;
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .status.running { color: var(--teal); border-color: #a7d9d4; background: var(--teal-soft); }
+  .status.blocked { color: var(--amber); border-color: #eccb96; background: var(--amber-soft); }
+  .status.failed { color: var(--red); border-color: #ecc0bd; background: var(--red-soft); }
+  .status.completed { color: var(--accent); border-color: #b9c9ee; background: var(--accent-soft); }
+  .run-id {
+    max-width: 200px;
+    overflow: hidden;
+    color: var(--muted);
+    font: 10px/1.4 var(--mono);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .timeline { min-height: 230px; padding: 4px 0 24px; }
+  .timeline-empty {
+    padding: 42px 16px;
+    border: 1px dashed var(--line-strong);
+    border-radius: 12px;
+    color: var(--muted);
+    text-align: center;
+  }
+  .timeline-empty strong { display: block; margin-bottom: 4px; color: var(--ink); font-size: 13px; }
+  .event {
+    position: relative;
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr);
+    gap: 12px;
+    padding: 7px 0 13px;
+  }
+  .event::before {
+    content: "";
+    position: absolute;
+    top: 25px;
+    bottom: -5px;
+    left: 11px;
+    width: 1px;
+    background: var(--line-strong);
+  }
+  .event:last-child::before { display: none; }
+  .route-node {
+    position: relative;
+    z-index: 1;
+    width: 23px;
+    height: 23px;
+    border: 5px solid var(--canvas);
+    border-radius: 50%;
+    background: var(--faint);
+  }
+  .event.think .route-node { background: var(--violet); }
+  .event.act .route-node, .event.decision .route-node { background: var(--accent); }
+  .event.observe .route-node, .event.done .route-node { background: var(--teal); }
+  .event.risk .route-node, .event.gate .route-node, .event.warn .route-node { background: var(--amber); }
+  .event.error .route-node { background: var(--red); }
+  .event-body { min-width: 0; padding-top: 1px; }
+  .event-meta { display: flex; align-items: center; gap: 8px; }
+  .event-phase { color: var(--ink); font-size: 11px; font-weight: 750; }
+  .event-time { color: var(--faint); font: 10px/1.4 var(--mono); }
+  .event-message { margin-top: 3px; color: #3e4a5f; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .event.risk .event-message, .event.gate .event-message { color: #744609; }
+  .event.error .event-message { color: var(--red); }
+
+  .inspect-pane {
+    grid-area: inspect;
+    min-height: 0;
+    overflow: auto;
+    padding: 20px 16px 30px;
+    background: var(--surface);
+    border-left: 1px solid var(--line);
+  }
+  .inspect-section { padding: 0 2px 20px; margin-bottom: 20px; border-bottom: 1px solid var(--line); }
+  .inspect-section:last-child { border-bottom: 0; }
+  .inspect-title {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 11px;
+  }
+  .inspect-title h2 {
+    margin: 0;
+    font-size: 11px;
+    font-weight: 760;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  .count-badge {
+    min-width: 20px;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: var(--rail);
+    color: var(--muted);
+    font: 10px/1.5 var(--mono);
+    text-align: center;
+  }
+  .approval-list, .risk-list, .span-list { display: flex; flex-direction: column; gap: 8px; }
+  .panel-empty {
+    padding: 13px;
+    border: 1px dashed var(--line-strong);
+    border-radius: 9px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .approval-card {
+    padding: 11px;
+    border: 1px solid #e7c78e;
+    border-radius: 10px;
+    background: var(--amber-soft);
+  }
+  .approval-kind { font-weight: 720; }
+  .approval-meta { margin-top: 4px; color: #795015; font: 10px/1.45 var(--mono); overflow-wrap: anywhere; }
+  .approval-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 10px; }
+  .detail-grid { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 7px 10px; font-size: 12px; }
+  .detail-grid dt { color: var(--muted); }
+  .detail-grid dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }
+  .resource-links { display: flex; gap: 12px; margin-top: 10px; }
+  .resource-links a { color: var(--accent); font-size: 11px; text-decoration: none; }
   .metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
   .metric {
-    border: 1px solid var(--soft);
-    border-radius: 7px;
-    background: #fbfcfd;
-    padding: 7px 8px;
     min-width: 0;
+    padding: 9px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--surface-subtle);
   }
-  .metric .k { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0; }
-  .metric .v { font-family: var(--mono); font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
-  .metric-empty { color: var(--muted); font-family: var(--mono); padding: 8px 0; }
-  .risk-list { border-top: 1px solid var(--soft); }
-  .risk-row { border-bottom: 1px solid var(--soft); padding: 8px 0; }
-  .risk-title { display: flex; gap: 6px; align-items: center; min-width: 0; }
-  .risk-title .tool { font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .risk-meta { color: var(--muted); font-family: var(--mono); font-size: 11px; margin-top: 4px; overflow-wrap: anywhere; }
-  .control-list { border: 1px solid var(--soft); border-radius: 7px; overflow: hidden; }
-  .control-row { padding: 8px; border-bottom: 1px solid var(--soft); cursor: pointer; }
-  .control-row:last-child { border-bottom: 0; }
-  .control-row:hover { background: #f4f6f8; }
-  .control-row .meta { color: var(--muted); font: 10px/1.4 var(--mono); overflow-wrap: anywhere; }
-  .control-links { display: flex; gap: 10px; margin-top: 7px; }
-  .control-links a { color: var(--blue); text-decoration: none; font-size: 11px; }
-  .chip.risk-high { color: var(--amber); background: #fff3d9; }
-  .chip.risk-critical { color: var(--red); background: #fff0ef; }
-  .chip.decision-auto_allow { color: var(--green); background: #e8f7ef; }
-  .chip.decision-ask { color: var(--amber); background: #fff3d9; }
-  .chip.decision-deny { color: var(--red); background: #fff0ef; }
-  @media (max-width: 1050px) {
-    .app { grid-template-columns: 320px 1fr; }
-    .inspect { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--line); max-height: 360px; }
+  .metric-key { color: var(--muted); font-size: 10px; }
+  .metric-value { margin-top: 3px; font: 13px/1.35 var(--mono); overflow-wrap: anywhere; }
+  .risk-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 10px; }
+  .risk-stat { padding: 8px 5px; border-radius: 8px; background: var(--surface-subtle); text-align: center; }
+  .risk-stat strong { display: block; font: 13px/1.2 var(--mono); }
+  .risk-stat span { color: var(--muted); font-size: 9px; }
+  .risk-row, .span-row { padding: 8px 0; border-top: 1px solid var(--line); }
+  .risk-head, .span-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .chip {
+    flex: 0 0 auto;
+    padding: 2px 5px;
+    border-radius: 5px;
+    background: var(--rail);
+    color: var(--muted);
+    font: 9px/1.5 var(--mono);
   }
+  .chip.ask, .chip.high { color: var(--amber); background: var(--amber-soft); }
+  .chip.deny, .chip.critical { color: var(--red); background: var(--red-soft); }
+  .chip.auto_allow, .chip.allow { color: var(--teal); background: var(--teal-soft); }
+  .risk-tool, .span-name { min-width: 0; overflow: hidden; font: 11px/1.4 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+  .risk-meta, .span-meta { margin-top: 4px; color: var(--muted); font: 10px/1.45 var(--mono); overflow-wrap: anywhere; }
+
+  @media (max-width: 1120px) {
+    .app {
+      grid-template:
+        "header header" auto
+        "history workspace" minmax(620px, auto)
+        "inspect inspect" auto
+        / 230px minmax(0, 1fr);
+    }
+    .appbar { min-height: 68px; }
+    .inspect-pane {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0 28px;
+      border-top: 1px solid var(--line);
+      border-left: 0;
+    }
+  }
+
   @media (max-width: 760px) {
-    .app { display: block; }
-    aside { min-height: auto; }
-    main { min-height: 360px; grid-template-rows: 58px minmax(260px, auto); }
-    .event { grid-template-columns: 72px 82px 1fr; padding-right: 10px; }
-    .inspect { max-height: none; }
+    .app {
+      display: grid;
+      grid-template:
+        "header" auto
+        "workspace" auto
+        "history" auto
+        "inspect" auto
+        / 1fr;
+    }
+    .appbar { flex-wrap: wrap; gap: 10px; padding: 13px 16px; }
+    .brand { min-width: 0; }
+    .service-connect { flex-basis: 100%; justify-content: flex-start; }
+    .token-input { flex: 1; width: auto; min-width: 150px; }
+    .history-pane { min-height: 260px; max-height: 420px; border-top: 1px solid var(--line); border-right: 0; }
+    .runtime-info { margin-top: 20px; }
+    .workspace { padding: 24px 16px 34px; }
+    .workspace-heading h1 { font-size: 28px; }
+    .composer-footer { align-items: flex-start; }
+    .activity-head { flex-wrap: wrap; padding: 10px 0; }
+    .activity-spacer { display: none; }
+    .inspect-pane { display: block; }
+    .run-id { order: 3; flex-basis: 100%; max-width: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
   }
 </style>
 </head>
 <body>
 <div class="app">
-  <aside>
+  <header class="appbar">
     <div class="brand">
-      <div class="mark"></div>
-      <div><h1>Web Agent Console</h1><p>Web Buddy runtime</p></div>
-    </div>
-
-    <div class="group">
-      <div class="label"><span>Service token</span><span id="authState">required</span></div>
-      <input id="serviceToken" type="password" autocomplete="off" placeholder="Raw token, without the Bearer prefix" />
-      <button class="btn secondary" id="connectBtn" style="width:100%;margin-top:8px">Connect</button>
-    </div>
-
-    <div class="group">
-      <div class="label"><span>Runtime</span><span>selector</span></div>
-      <div class="seg runtime" id="runtimeSeg">
-        <button data-v="web-buddy-raw" class="on">Web Buddy Raw</button>
-        <button data-v="web-buddy-match">Web Buddy Match</button>
+      <div class="agent-mark" aria-hidden="true"></div>
+      <div>
+        <div class="brand-title">Web Agent</div>
+        <div class="brand-subtitle">通用网页任务控制台</div>
       </div>
     </div>
+    <div class="service-connect">
+      <label class="sr-only" for="serviceToken">服务令牌</label>
+      <input class="token-input" id="serviceToken" type="password" autocomplete="off" placeholder="输入服务令牌以连接本地 Runtime" />
+      <button class="btn secondary" id="connectBtn">连接服务</button>
+      <span class="connection-state" id="authState">未连接</span>
+    </div>
+  </header>
 
-    <div class="group">
-      <div class="label"><span>Scenario</span><span>preset</span></div>
-      <div class="seg preset" id="presetSeg">
-        <button data-v="generic" class="on">Generic</button>
-        <button data-v="venue">Venue</button>
-        <button data-v="alibaba">Alibaba</button>
-      </div>
+  <aside class="history-pane">
+    <div class="section-kicker"><span>任务历史</span><span id="runCount">0</span></div>
+    <div class="history-list" id="runList">
+      <div class="history-empty">连接服务后，这里会显示最近的任务。</div>
     </div>
-
-    <div class="group">
-      <div class="label"><span>Target URL</span><span>required</span></div>
-      <input id="url" placeholder="https://example.com" />
-    </div>
-
-    <div class="group">
-      <div class="label"><span>Task</span><span>prompt</span></div>
-      <textarea id="prompt"></textarea>
-    </div>
-
-    <div class="group" id="resumeGroup">
-      <div class="label"><span>Profile context</span><span>server managed</span></div>
-      <div class="hint" id="resumeHint">Sensitive profile material is supplied by a dedicated server-side provider.</div>
-    </div>
-
-    <div class="group">
-      <div class="label"><span>Model endpoint</span><span>server config</span></div>
-      <input id="baseUrl" readonly />
-    </div>
-    <div class="group">
-      <div class="label"><span>Model</span></div>
-      <input id="model" readonly />
-    </div>
-    <div class="group">
-      <div class="label"><span>Model credential</span><span id="keyState">server provider</span></div>
-      <div class="hint">Credentials never enter ordinary Run, Trace, Artifact, or Memory payloads.</div>
-    </div>
-
-    <div class="group">
-      <label class="check"><input type="checkbox" id="headless" /> Run headless</label>
-    </div>
-
-    <div class="actions">
-      <button class="btn primary" id="runBtn" disabled>Run Agent</button>
-      <button class="btn secondary" id="refreshBtn" disabled>Refresh Trace</button>
-      <button class="btn secondary" id="pauseBtn" disabled>Pause</button>
-      <button class="btn secondary" id="resumeBtn" disabled>Resume</button>
-      <button class="btn danger" id="stopBtn" disabled>Stop</button>
+    <div class="runtime-info">
+      <div class="runtime-info-label">当前模型</div>
+      <div class="runtime-info-value" id="modelInfo">等待连接</div>
+      <div class="credential-note" id="credentialInfo">模型凭据只由服务端管理</div>
     </div>
   </aside>
 
-  <main>
-    <div class="topbar">
-      <span class="status" id="status"><span class="dot"></span><span id="statusText">idle</span></span>
-      <span class="runid" id="runId">no run</span>
-    </div>
-    <div class="timeline" id="timeline">
-      <div class="empty">Configure a URL and task, then run the agent.</div>
+  <main class="workspace">
+    <div class="workspace-inner">
+      <div class="workspace-heading">
+        <div class="eyebrow">New task</div>
+        <h1>告诉 Agent 去哪里、做什么。</h1>
+        <p>一个入口处理研究、比较、表单和多步骤网页操作。</p>
+      </div>
+
+      <section class="composer" aria-label="创建 Web Agent 任务">
+        <div class="address-row">
+          <div class="browser-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+          <label class="sr-only" for="url">目标网址</label>
+          <input class="url-input" id="url" inputmode="url" autocomplete="url" placeholder="https://example.com" />
+        </div>
+        <div class="goal-wrap">
+          <label class="field-label" for="prompt">任务目标 <span>写清结果、限制条件和停止边界</span></label>
+          <textarea class="goal-input" id="prompt" placeholder="例如：阅读当前网站的产品与定价页面，比较三个方案，给出适合 20 人团队的建议，并附上页面证据。不要创建订单或提交付款。"></textarea>
+        </div>
+        <div class="composer-footer">
+          <label class="run-options"><input type="checkbox" id="headless" checked /> 在后台运行浏览器</label>
+          <button class="btn primary" id="runBtn" disabled>开始任务</button>
+        </div>
+      </section>
+      <div class="safety-note">
+        <span class="safety-icon" aria-hidden="true">i</span>
+        <span>登录、验证码、文件上传、发送、支付和最终提交等敏感动作会按策略暂停，等待人工确认。</span>
+      </div>
+
+      <section class="activity">
+        <div class="activity-head">
+          <h2>执行路径</h2>
+          <span class="status" id="status"><span class="status-dot"></span><span id="statusText">空闲</span></span>
+          <span class="run-id" id="runId">尚未运行</span>
+          <span class="activity-spacer"></span>
+          <button class="btn ghost small" id="refreshBtn" disabled>刷新轨迹</button>
+          <button class="btn danger small" id="stopBtn" disabled>停止任务</button>
+        </div>
+        <div class="timeline" id="timeline">
+          <div class="timeline-empty"><strong>任务尚未开始</strong>填写目标网址和任务目标，然后启动 Agent。</div>
+        </div>
+      </section>
     </div>
   </main>
 
-  <section class="inspect">
-    <div class="panel">
-      <h2>Run</h2>
-      <div class="kv">
-        <div>Status</div><div class="mono" id="runStatus">idle</div>
-        <div>Runtime</div><div class="mono" id="runRuntime">-</div>
-        <div>Mode</div><div class="mono" id="runMode">-</div>
-        <div>Run ID</div><div class="mono" id="runIdPanel">-</div>
-        <div>Run dir</div><div class="mono" id="runDir">-</div>
-        <div>Trace dir</div><div class="mono" id="traceDir">-</div>
-        <div>Trace path</div><div class="mono" id="tracePath">-</div>
-        <div>Spans</div><div class="mono" id="spanCount">0</div>
+  <aside class="inspect-pane">
+    <section class="inspect-section" data-contract="approval-inbox">
+      <div class="inspect-title"><h2>待人工确认</h2><span class="count-badge" id="approvalCount">0</span></div>
+      <div class="approval-list" id="approvalList"><div class="panel-empty">当前没有等待确认的动作。</div></div>
+    </section>
+
+    <section class="inspect-section">
+      <div class="inspect-title"><h2>运行详情</h2></div>
+      <dl class="detail-grid">
+        <dt>状态</dt><dd id="runStatus">空闲</dd>
+        <dt>Run ID</dt><dd id="runIdPanel">-</dd>
+        <dt>修订</dt><dd id="runRevision">-</dd>
+        <dt>尝试</dt><dd id="runAttempt">-</dd>
+        <dt>轨迹片段</dt><dd id="spanCount">0</dd>
+      </dl>
+      <div class="resource-links">
+        <a id="traceLink" href="#" target="_blank">查看完整轨迹</a>
+        <a id="artifactLink" href="#" target="_blank">查看产物</a>
       </div>
-      <div class="control-links">
-        <a id="traceLink" href="#" target="_blank">Trace API</a>
-        <a id="artifactLink" href="#" target="_blank">Artifacts API</a>
+    </section>
+
+    <section class="inspect-section">
+      <div class="inspect-title"><h2>执行指标</h2></div>
+      <div id="metricsEmpty" class="panel-empty">运行后会显示模型与浏览器调用指标。</div>
+      <div class="metric-grid" id="metricsGrid" hidden>
+        <div class="metric"><div class="metric-key">耗时</div><div class="metric-value" id="metricDuration">-</div></div>
+        <div class="metric"><div class="metric-key">模型调用</div><div class="metric-value" id="metricLlmCalls">-</div></div>
+        <div class="metric"><div class="metric-key">工具调用</div><div class="metric-value" id="metricToolCalls">-</div></div>
+        <div class="metric"><div class="metric-key">页面快照</div><div class="metric-value" id="metricSnapshots">-</div></div>
+        <div class="metric"><div class="metric-key">点击</div><div class="metric-value" id="metricClicks">-</div></div>
+        <div class="metric"><div class="metric-key">截图</div><div class="metric-value" id="metricScreenshots">-</div></div>
       </div>
-    </div>
-    <div class="panel">
-      <h2>Tasks</h2>
-      <div id="runList" class="control-list"><div class="metric-empty" style="padding:8px">No durable runs.</div></div>
-    </div>
-    <div class="panel">
-      <h2>Approval Inbox</h2>
-      <div id="approvalList" class="control-list"><div class="metric-empty" style="padding:8px">No pending approvals.</div></div>
-    </div>
-    <div class="panel">
-      <h2>Metrics</h2>
-      <div id="metricsEmpty" class="metric-empty">No metrics yet.</div>
-      <div class="metric-grid" id="metricsGrid" style="display:none">
-        <div class="metric"><div class="k">Status</div><div class="v" id="metricStatus">-</div></div>
-        <div class="metric"><div class="k">Duration</div><div class="v" id="metricDuration">-</div></div>
-        <div class="metric"><div class="k">LLM calls</div><div class="v" id="metricLlmCalls">-</div></div>
-        <div class="metric"><div class="k">Tool calls</div><div class="v" id="metricToolCalls">-</div></div>
-        <div class="metric"><div class="k">MCP tools</div><div class="v" id="metricMcpToolCalls">-</div></div>
-        <div class="metric"><div class="k">Snapshots</div><div class="v" id="metricSnapshots">-</div></div>
-        <div class="metric"><div class="k">Clicks</div><div class="v" id="metricClicks">-</div></div>
-        <div class="metric"><div class="k">Types</div><div class="v" id="metricTypes">-</div></div>
-        <div class="metric"><div class="k">Waits</div><div class="v" id="metricWaits">-</div></div>
-        <div class="metric"><div class="k">Screenshots</div><div class="v" id="metricScreenshots">-</div></div>
-        <div class="metric"><div class="k">Handoffs</div><div class="v" id="metricHandoffs">-</div></div>
-        <div class="metric"><div class="k">Failure</div><div class="v" id="metricFailure">-</div></div>
+    </section>
+
+    <section class="inspect-section">
+      <div class="inspect-title"><h2>风险决策</h2></div>
+      <div id="riskEmpty" class="panel-empty">尚未产生风险决策。</div>
+      <div id="riskContent" hidden>
+        <div class="risk-summary">
+          <div class="risk-stat"><strong id="riskAutoAllowed">0</strong><span>自动放行</span></div>
+          <div class="risk-stat"><strong id="riskGated">0</strong><span>等待确认</span></div>
+          <div class="risk-stat"><strong id="riskDenied">0</strong><span>拒绝</span></div>
+        </div>
+        <div class="risk-list" id="riskList"></div>
       </div>
-    </div>
-    <div class="panel">
-      <h2>Risk Decisions</h2>
-      <div id="riskEmpty" class="metric-empty">No risk decisions yet.</div>
-      <div class="metric-grid" id="riskGrid" style="display:none">
-        <div class="metric"><div class="k">Auto allowed</div><div class="v" id="riskAutoAllowed">0</div></div>
-        <div class="metric"><div class="k">Gated</div><div class="v" id="riskGated">0</div></div>
-        <div class="metric"><div class="k">Denied</div><div class="v" id="riskDenied">0</div></div>
-        <div class="metric"><div class="k">Total</div><div class="v" id="riskTotal">0</div></div>
-      </div>
-      <div id="riskList" class="risk-list" style="display:none"></div>
-    </div>
-    <div class="panel">
-      <h2>Trace Spans</h2>
-      <div id="spans"><div class="empty" style="padding:8px 0">No spans yet.</div></div>
-    </div>
-  </section>
+    </section>
+
+    <section class="inspect-section">
+      <div class="inspect-title"><h2>轨迹片段</h2></div>
+      <div class="span-list" id="spans"><div class="panel-empty">尚未生成轨迹片段。</div></div>
+    </section>
+  </aside>
 </div>
 
 <script>
 const $ = (id) => document.getElementById(id);
-const GENERIC_PROMPT = '请打开目标网页，根据我的目标完成操作。遇到登录、验证码、扫码、真实身份验证或其他必须人工处理的步骤时，请暂停并输出 AGENT_STATUS=BLOCKED。';
-const ALIBABA_PROMPT = '这是我的个人简历文件，然后现在我想去阿里官方招聘网站进行投递，然后请帮我找到适合我的岗位，然后帮我进行投递，填写表单，充分利用网站信息';
-const ALIBABA_URL = 'https://talent-holding.alibaba.com/off-campus/position-list?lang=zh';
-const VENUE_PROMPT = '请为杭州团队筹备 2026 年 7 月 21 日 13:00–17:00 的 20 人半天工作坊。总预算不超过 4200 元，场地评分至少 4.7，地铁步行不超过 10 分钟，必须有 4K 大屏、可书写白板、20 人茶歇（可加购），并支持活动开始 24 小时前免费取消。请至少比较 3 个场地，选择满足全部条件的最佳方案，然后填写预订信息：联系人林舟，企业杭州栖木科技有限公司，手机号 13800001126，邮箱 linzhou@example.test，发票选择企业增值税普通发票，留言“请将桌椅预设为 4 组岛形布局”，并勾选已核对方案。不要点击任何会创建订单或发起支付的按钮；到达最终支付按钮后停下，汇报最终选择、其他候选项的淘汰原因、总价明细和最终按钮文字，然后输出 AGENT_STATUS=COMPLETED。';
-const venueUrl = () => `${window.location.origin}/fixtures/venue-booking`;
-let preset = 'generic';
-let runtime = 'web-buddy-raw';
-let activeRuntime = null;
-let activeMode = null;
-let runId = null;
-let activeRunRevision = 0;
-let events = null;
-let traceTimer = null;
-let riskTimelineKeys = new Set();
-let serviceToken = '';
-let connected = false;
-
-const RUNTIMES = {
-  'web-buddy-raw': {
-    label: 'Web Buddy Raw',
-    mode: () => 'raw',
-    runPath: '/api/runs',
-    eventsPath: (id) => `/api/events?id=${encodeURIComponent(id)}`,
-    tracePath: (id) => `/api/trace?id=${encodeURIComponent(id)}`,
-    stopPath: (id) => `/api/runs/${encodeURIComponent(id)}/cancel`,
-  },
-  'web-buddy-match': {
-    label: 'Web Buddy Match',
-    mode: () => 'match',
-    runPath: '/api/runs',
-    eventsPath: (id) => `/api/events?id=${encodeURIComponent(id)}`,
-    tracePath: (id) => `/api/trace?id=${encodeURIComponent(id)}`,
-    stopPath: (id) => `/api/runs/${encodeURIComponent(id)}/cancel`,
-  },
+const SENSITIVE_ACTIONS = ['upload', 'send', 'publish', 'submit', 'payment', 'memory_write', 'permission_write'];
+const STATUS_LABELS = {
+  idle: '空闲',
+  queued: '排队中',
+  running: '运行中',
+  resuming: '恢复中',
+  pausing: '暂停中',
+  paused: '已暂停',
+  blocked: '等待确认',
+  blocked_on_human: '等待确认',
+  recoverable: '可恢复',
+  completed: '已完成',
+  done: '已完成',
+  failed: '失败',
+  cancelled: '已停止',
+  cancelling: '停止中',
+};
+const PHASE_LABELS = {
+  think: '思考',
+  risk: '风险',
+  decision: '决策',
+  act: '操作',
+  observe: '观察',
+  gate: '待确认',
+  warn: '警告',
+  error: '错误',
+  done: '完成',
+  info: '进度',
 };
 
-function runtimeInfo(name = runtime) {
-  return RUNTIMES[name] || RUNTIMES['web-buddy-raw'];
+let serviceToken = '';
+let connected = false;
+let runId = null;
+let activeRunRevision = 0;
+let activeAttempt = 0;
+let eventStream = null;
+let traceTimer = null;
+let riskTimelineKeys = new Set();
+
+function statusLabel(value) {
+  return STATUS_LABELS[value] || value || '未知';
 }
 
-function activeRuntimeInfo() {
-  return runtimeInfo(activeRuntime || runtime);
-}
-
-function runtimeMode() {
-  return runtimeInfo().mode();
-}
-
-function setRuntime(next) {
-  runtime = RUNTIMES[next] ? next : 'web-buddy-raw';
-  document.querySelectorAll('#runtimeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.v === runtime));
-  updateRunMeta();
-}
-
-function setPreset(next) {
-  preset = next;
-  document.querySelectorAll('#presetSeg button').forEach((b) => b.classList.toggle('on', b.dataset.v === preset));
-  if (preset === 'alibaba') {
-    if (!$('url').value.trim()) $('url').value = ALIBABA_URL;
-    if (!$('prompt').value.trim() || $('prompt').value === GENERIC_PROMPT || $('prompt').value === VENUE_PROMPT) $('prompt').value = ALIBABA_PROMPT;
-  } else if (preset === 'venue') {
-    $('url').value = venueUrl();
-    $('prompt').value = VENUE_PROMPT;
-  } else if (!$('prompt').value.trim() || $('prompt').value === ALIBABA_PROMPT || $('prompt').value === VENUE_PROMPT) {
-    $('prompt').value = GENERIC_PROMPT;
-  }
-  $('resumeHint').textContent = preset === 'venue'
-    ? '场地预订测试不读取个人资料。'
-    : 'Sensitive profile material is supplied by a dedicated server-side provider.';
-  updateRunMeta();
-}
-
-function updateRunMeta(extra = {}) {
-  const info = runtimeInfo(activeRuntime || runtime);
-  $('runRuntime').textContent = extra.runtime || info.label;
-  $('runMode').textContent = extra.mode || activeMode || runtimeMode();
-  $('runIdPanel').textContent = extra.runId || runId || '-';
-  const selected = extra.runId || runId;
-  $('traceLink').href = '#';
-  $('traceLink').dataset.path = selected ? `/api/runs/${encodeURIComponent(selected)}/trace` : '';
-  $('artifactLink').href = '#';
-  $('artifactLink').dataset.path = selected ? `/api/runs/${encodeURIComponent(selected)}/artifacts` : '';
+function statusClass(value) {
+  if (['running', 'queued', 'resuming', 'pausing'].includes(value)) return 'running';
+  if (['blocked', 'blocked_on_human', 'paused', 'recoverable'].includes(value)) return 'blocked';
+  if (value === 'failed') return 'failed';
+  if (['completed', 'done'].includes(value)) return 'completed';
+  return '';
 }
 
 function setStatus(value) {
-  const status = $('status');
-  status.className = 'status';
-  if (value === 'running') status.classList.add('running');
-  if (value === 'blocked') status.classList.add('blocked');
-  if (value === 'failed') status.classList.add('failed');
-  $('statusText').textContent = value;
-  $('runStatus').textContent = value;
+  const normalized = value || 'idle';
+  $('status').className = `status ${statusClass(normalized)}`.trim();
+  $('statusText').textContent = statusLabel(normalized);
+  $('runStatus').textContent = statusLabel(normalized);
 }
 
-async function api(path, opts) {
-  if (!serviceToken) throw new Error('Service token is required.');
-  const headers = new Headers(opts?.headers);
+function setConnectionState(state, text) {
+  $('authState').className = `connection-state ${state || ''}`.trim();
+  $('authState').textContent = text;
+}
+
+function setRunControls(running) {
+  $('runBtn').disabled = !connected || running;
+  $('stopBtn').disabled = !running || !runId;
+  $('refreshBtn').disabled = !connected || !runId;
+  $('url').disabled = running;
+  $('prompt').disabled = running;
+  $('headless').disabled = running;
+}
+
+function updateRunMeta(item = {}) {
+  if (item.runId) runId = item.runId;
+  if (typeof item.revision === 'number') activeRunRevision = item.revision;
+  if (typeof item.attempt === 'number') activeAttempt = item.attempt;
+  $('runId').textContent = runId || '尚未运行';
+  $('runIdPanel').textContent = runId || '-';
+  $('runRevision').textContent = runId ? String(activeRunRevision) : '-';
+  $('runAttempt').textContent = runId ? String(activeAttempt || 1) : '-';
+  $('traceLink').dataset.path = runId ? `/api/runs/${encodeURIComponent(runId)}/trace` : '';
+  $('artifactLink').dataset.path = runId ? `/api/runs/${encodeURIComponent(runId)}/artifacts` : '';
+}
+
+async function api(path, options) {
+  if (!serviceToken) throw new Error('请先输入服务令牌。');
+  const headers = new Headers(options?.headers);
   headers.set('authorization', `Bearer ${serviceToken}`);
-  const res = await fetch(path, { ...opts, headers });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  const response = await fetch(path, { ...options, headers });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.message || data.error || response.statusText);
   return data;
-}
-
-async function loadConfig() {
-  const cfg = await api('/api/config');
-  $('baseUrl').value = cfg.baseUrl || '';
-  $('model').value = cfg.name || '';
-  $('keyState').textContent = cfg.credentialConfigured ? 'configured' : 'not configured';
-  setPreset('generic');
-  setRuntime('web-buddy-raw');
 }
 
 async function connectService() {
   serviceToken = $('serviceToken').value.trim();
-  if (!serviceToken) throw new Error('Service token is required.');
-  await loadConfig();
-  await refreshControlPlane();
-  connected = true;
-  $('authState').textContent = 'connected';
-  $('runBtn').disabled = false;
-  $('refreshBtn').disabled = false;
+  if (!serviceToken) throw new Error('请输入服务令牌。');
+  $('connectBtn').disabled = true;
+  setConnectionState('', '连接中');
+  try {
+    const config = await api('/api/config');
+    connected = true;
+    $('modelInfo').textContent = `${config.provider || 'provider'} / ${config.name || 'model'}`;
+    $('credentialInfo').textContent = config.credentialConfigured ? '服务端凭据已配置' : '服务端尚未配置模型凭据';
+    await refreshControlPlane();
+    setConnectionState('connected', '已连接');
+    $('connectBtn').textContent = '重新连接';
+    setRunControls(false);
+  } catch (error) {
+    connected = false;
+    serviceToken = '';
+    setConnectionState('failed', '连接失败');
+    setRunControls(false);
+    throw error;
+  } finally {
+    $('connectBtn').disabled = false;
+  }
+}
+
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === 'object') {
+    const result = {};
+    for (const key of Object.keys(value).sort()) result[key] = canonicalize(value[key]);
+    return result;
+  }
+  return value;
+}
+
+async function sha256Hex(value) {
+  const bytes = new TextEncoder().encode(JSON.stringify(canonicalize(value)));
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function buildGenericSnapshot(startUrl, instruction, headless) {
+  const revision = 0;
+  const sensitiveRule = {
+    id: 'web-console-sensitive-actions',
+    actionKinds: SENSITIVE_ACTIONS,
+    decision: 'ask',
+    requireApprovalBinding: true,
+  };
+  const unsigned = {
+    schemaVersion: 'web-task-input-snapshot/v1',
+    inputSchemaVersion: 'web-task-input/v1',
+    goal: {
+      instruction,
+      scenario: 'generic-web-agent',
+      metadata: { headless },
+    },
+    contract: {
+      schemaVersion: 'web-task-contract/v1',
+      contractId: 'web-console.generic.v1',
+      revision,
+      criteria: [
+        {
+          id: 'current-page-evidence',
+          kind: 'evidence_present',
+          description: 'The generic Web Agent must preserve current page evidence.',
+          evidenceKinds: ['page'],
+          minCount: 1,
+          allowedAuthorities: ['main_runtime'],
+        },
+        {
+          id: 'final-submit-boundary',
+          kind: 'action_boundary',
+          description: 'The generic Web Agent must stop before final submission.',
+          actionKinds: ['submit'],
+          outcome: 'not_performed',
+        },
+      ],
+      sensitiveActions: [sensitiveRule],
+    },
+    startUrl,
+    contextItems: [],
+    contextProviders: [],
+    policy: {
+      schemaVersion: 'task-policy/v1',
+      defaultSensitiveAction: 'ask',
+      rules: [sensitiveRule],
+    },
+    runId: `ui-${crypto.randomUUID()}`,
+    revision,
+  };
+  return { ...unsigned, sha256: await sha256Hex(unsigned) };
+}
+
+function validateRunInput() {
+  const rawUrl = $('url').value.trim();
+  const prompt = $('prompt').value.trim();
+  if (!rawUrl) return { error: '请输入目标网址。' };
+  if (!prompt) return { error: '请描述任务目标。' };
+  try {
+    const parsed = new URL(rawUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return { error: '目标网址只支持 HTTP 或 HTTPS。' };
+    return { url: parsed.toString(), prompt };
+  } catch {
+    return { error: '目标网址格式不正确，例如 https://example.com。' };
+  }
+}
+
+function resetRunView() {
+  closeLiveUpdates();
+  runId = null;
+  activeRunRevision = 0;
+  activeAttempt = 0;
+  riskTimelineKeys = new Set();
+  updateRunMeta();
+  $('spanCount').textContent = '0';
+  $('timeline').innerHTML = '<div class="timeline-empty"><strong>正在启动 Agent</strong>建立安全会话并打开目标网页。</div>';
+  renderMetrics(null);
+  renderRiskDecisions(null);
+  renderSpans([]);
+}
+
+function eventLevel(event) {
+  if (event.level) return event.level;
+  if (event.type === 'run_failed') return 'error';
+  if (event.type === 'run_completed') return 'done';
+  if (event.type === 'run_blocked') return 'gate';
+  return 'info';
+}
+
+function eventPhase(event, level) {
+  if (PHASE_LABELS[level]) return PHASE_LABELS[level];
+  return event.phase || event.type || '进度';
 }
 
 function addEvent(event) {
   const timeline = $('timeline');
-  if (timeline.querySelector('.empty')) timeline.innerHTML = '';
+  if (timeline.querySelector('.timeline-empty')) timeline.innerHTML = '';
+  const level = eventLevel(event);
   const row = document.createElement('div');
-  const level = event.level || 'info';
   row.className = `event ${level}`;
-  const time = event.ts ? new Date(event.ts).toLocaleTimeString() : new Date().toLocaleTimeString();
-  row.innerHTML = `<div class="time">${time}</div><div class="phase"></div><div class="msg"></div>`;
-  row.querySelector('.phase').textContent = timelinePhase(event);
-  row.querySelector('.msg').textContent = event.message || '';
+  row.innerHTML = '<div class="route-node" aria-hidden="true"></div><div class="event-body"><div class="event-meta"><span class="event-phase"></span><span class="event-time"></span></div><div class="event-message"></div></div>';
+  const timestamp = event.ts || event.timestamp || new Date().toISOString();
+  row.querySelector('.event-phase').textContent = eventPhase(event, level);
+  row.querySelector('.event-time').textContent = new Date(timestamp).toLocaleTimeString();
+  row.querySelector('.event-message').textContent = event.message || event.snapshot?.reason || event.type || '';
   timeline.appendChild(row);
-  timeline.scrollTop = timeline.scrollHeight;
-  if (level === 'gate') {
-    setStatus('blocked');
-  }
+  row.scrollIntoView({ block: 'nearest' });
+  if (level === 'gate') setStatus('blocked');
 }
 
-async function refreshTrace() {
-  if (!runId) return;
-  const trace = await api(activeRuntimeInfo().tracePath(runId));
-  updateRunMeta({ runId });
-  $('runDir').textContent = 'server managed';
-  $('traceDir').textContent = 'server managed';
-  $('tracePath').textContent = `/api/runs/${runId}/trace`;
-  $('spanCount').textContent = String(trace.spans?.length || 0);
-  renderMetrics(trace.metrics || null);
-  renderRiskDecisions(trace.riskDecisions || null);
-  appendRiskTimeline(trace.riskDecisions?.decisions || []);
-  renderSpans(trace.spans || []);
-}
-
-function displayRuntime(value) {
-  if (value === 'web-buddy') return activeRuntimeInfo().label;
-  return value || activeRuntimeInfo().label;
-}
-
-function timelinePhase(event) {
-  if (event.level === 'think') return 'Think';
-  if (event.level === 'risk') return 'Risk';
-  if (event.level === 'decision') return 'Decision';
-  if (event.level === 'act') return 'Tool';
-  if (event.level === 'observe') return 'Observation';
-  return event.phase || event.level || 'info';
-}
-
-function renderMetrics(metrics) {
-  if (!metrics) {
-    $('metricsEmpty').style.display = 'block';
-    $('metricsGrid').style.display = 'none';
-    return;
-  }
-  $('metricsEmpty').style.display = 'none';
-  $('metricsGrid').style.display = 'grid';
-  $('metricStatus').textContent = metrics.status || '-';
-  $('metricDuration').textContent = formatDuration(metrics.durationMs);
-  $('metricLlmCalls').textContent = String(metrics.llmCalls ?? 0);
-  $('metricToolCalls').textContent = String(metrics.toolCalls ?? 0);
-  $('metricMcpToolCalls').textContent = String(metrics.mcpToolCalls ?? 0);
-  $('metricSnapshots').textContent = String(metrics.browserSnapshots ?? 0);
-  $('metricClicks').textContent = String(metrics.browserClicks ?? 0);
-  $('metricTypes').textContent = String(metrics.browserTypes ?? 0);
-  $('metricWaits').textContent = String(metrics.browserWaits ?? 0);
-  $('metricScreenshots').textContent = String(metrics.screenshots ?? 0);
-  $('metricHandoffs').textContent = String(metrics.manualHandoffs ?? 0);
-  $('metricFailure').textContent = metrics.failureCategory || '-';
-}
-
-function renderRiskDecisions(artifact) {
-  const decisions = Array.isArray(artifact?.decisions) ? artifact.decisions : [];
-  if (!decisions.length) {
-    $('riskEmpty').style.display = 'block';
-    $('riskGrid').style.display = 'none';
-    $('riskList').style.display = 'none';
-    $('riskList').innerHTML = '';
-    return;
-  }
-  const summary = artifact.summary || {};
-  $('riskEmpty').style.display = 'none';
-  $('riskGrid').style.display = 'grid';
-  $('riskList').style.display = 'block';
-  $('riskAutoAllowed').textContent = String(summary.autoAllowed ?? countDecision(decisions, 'auto_allow'));
-  $('riskGated').textContent = String(summary.gated ?? countDecision(decisions, 'ask'));
-  $('riskDenied').textContent = String(summary.denied ?? countDecision(decisions, 'deny'));
-  $('riskTotal').textContent = String(summary.total ?? decisions.length);
-
-  const root = $('riskList');
-  root.innerHTML = '';
-  for (const decision of decisions.slice(-6).reverse()) {
-    const row = document.createElement('div');
-    row.className = 'risk-row';
-    row.innerHTML = '<div class="risk-title"><span class="chip"></span><span class="chip"></span><span class="tool"></span></div><div class="risk-meta"></div>';
-    const chips = row.querySelectorAll('.chip');
-    chips[0].className = `chip risk-${decision.riskLevel || 'low'}`;
-    chips[0].textContent = decision.risk || decision.riskLevel || 'risk';
-    chips[1].className = `chip decision-${decision.decision || 'allow'}`;
-    chips[1].textContent = decision.decision || 'allow';
-    row.querySelector('.tool').textContent = decision.action || decision.tool || '';
-    row.querySelector('.risk-meta').textContent = [decision.gateKind, decision.permissionMode, decision.reason].filter(Boolean).join(' · ');
-    root.appendChild(row);
-  }
-}
-
-function appendRiskTimeline(decisions) {
-  for (const decision of decisions) {
-    if (!shouldShowRiskTimeline(decision)) continue;
-    const key = riskDecisionKey(decision);
-    if (riskTimelineKeys.has(key)) continue;
-    riskTimelineKeys.add(key);
-    if (decision.source === 'policy') {
-      addEvent({
-        ts: decision.timestamp,
-        level: 'risk',
-        phase: 'Risk',
-        message: riskLine(decision),
-      });
-    } else {
-      addEvent({
-        ts: decision.timestamp,
-        level: 'decision',
-        phase: 'Decision',
-        message: decisionLine(decision),
-      });
-    }
-  }
-}
-
-function shouldShowRiskTimeline(decision) {
-  return decision.riskLevel === 'high' ||
-    decision.riskLevel === 'critical' ||
-    decision.decision === 'ask' ||
-    decision.decision === 'deny' ||
-    decision.decision === 'auto_allow';
-}
-
-function riskDecisionKey(decision) {
-  return [decision.source, decision.step, decision.tool, decision.decision, decision.timestamp, decision.ruleId].join('|');
-}
-
-function riskLine(decision) {
-  const gate = decision.gateKind ? ` gate=${decision.gateKind}` : '';
-  return `${decision.tool || 'tool'}: risk ${decision.risk || '-'} / ${decision.riskLevel || '-'}${gate} | ${decision.reason || ''}`;
-}
-
-function decisionLine(decision) {
-  const subject = gateLabel(decision.gateKind);
-  const action = decision.action || decision.tool || '';
-  const reason = decision.reason || '';
-  if (decision.decision === 'auto_allow') {
-    const mode = decision.permissionMode ? ` by ${decision.permissionMode} mode` : '';
-    return `${subject} auto-allowed${mode}: ${action} | ${reason}`;
-  }
-  if (decision.decision === 'ask') return `${subject} gated: ${action} | ${reason}`;
-  if (decision.decision === 'deny') return `${subject} denied: ${action} | ${reason}`;
-  return `${subject} allowed: ${action} | ${reason}`;
-}
-
-function gateLabel(gateKind) {
-  if (gateKind === 'final_submit') return 'final-submit';
-  if (gateKind === 'upload_resume') return 'resume upload';
-  if (gateKind === 'save_resume') return 'save-resume';
-  if (gateKind === 'login') return 'login';
-  if (gateKind === 'captcha') return 'captcha';
-  return 'high-risk action';
-}
-
-function countDecision(decisions, value) {
-  return decisions.filter((decision) => decision.decision === value).length;
-}
-
-function formatDuration(value) {
-  const ms = Number(value || 0);
-  if (!Number.isFinite(ms) || ms <= 0) return '0ms';
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`;
-}
-
-function renderSpans(spans) {
-  const root = $('spans');
-  if (!spans.length) {
-    root.innerHTML = '<div class="empty" style="padding:8px 0">No spans yet.</div>';
-    return;
-  }
-  root.innerHTML = '';
-  for (const span of spans.slice(-40).reverse()) {
-    const div = document.createElement('div');
-    div.className = 'span';
-    div.innerHTML = `<div class="span-head"><span class="chip ${span.spanType || ''}">${span.spanType || 'span'}</span><span class="span-name"></span></div><div class="span-meta"></div>`;
-    div.querySelector('.span-name').textContent = span.toolName || span.name || '';
-    div.querySelector('.span-meta').textContent = `${span.status || ''} · ${span.latencyMs || 0}ms`;
-    root.appendChild(div);
-  }
-}
-
-function closeStream() {
-  if (events) {
-    events.abort();
-    events = null;
+function closeLiveUpdates() {
+  if (eventStream) {
+    eventStream.abort();
+    eventStream = null;
   }
   if (traceTimer) {
     clearInterval(traceTimer);
@@ -630,7 +977,7 @@ async function openEventStream(path, onEvent) {
   const response = await fetch(path, { headers, signal: controller.signal });
   if (!response.ok || !response.body) {
     const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.error || `Event stream failed with ${response.status}`);
+    throw new Error(payload.message || payload.error || `事件流连接失败（${response.status}）`);
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -652,53 +999,25 @@ async function openEventStream(path, onEvent) {
         }
       }
     } catch (error) {
-      if (!controller.signal.aborted) {
-        addEvent({ level: 'error', phase: 'events', message: error.message || String(error) });
-      }
+      if (!controller.signal.aborted) addEvent({ level: 'error', phase: 'events', message: error.message || String(error) });
     }
   })();
   return controller;
 }
 
-function setRunControls(running) {
-  $('runBtn').disabled = running;
-  $('stopBtn').disabled = !running;
-  $('pauseBtn').disabled = !running;
-  $('resumeBtn').disabled = true;
-  document.querySelectorAll('#runtimeSeg button').forEach((button) => { button.disabled = running; });
-  document.querySelectorAll('#presetSeg button').forEach((button) => { button.disabled = running; });
-}
-
-function validateRunInput() {
-  const url = $('url').value.trim();
-  const prompt = $('prompt').value.trim();
-  if (!url) return 'Target URL is required.';
-  if (!prompt) return 'Task prompt is required.';
-  try {
-    new URL(url);
-  } catch {
-    return 'Target URL must be a valid URL, for example https://example.com.';
-  }
-  return '';
-}
-
-$('presetSeg').addEventListener('click', (event) => {
-  const button = event.target.closest('button');
-  if (button) setPreset(button.dataset.v);
-});
-
-$('runtimeSeg').addEventListener('click', (event) => {
-  const button = event.target.closest('button');
-  if (button) setRuntime(button.dataset.v);
-});
-
 function handleLiveEvent(event) {
   if (event._end) {
-    updateRunMeta({ mode: activeMode, runId });
-    setStatus(finalStatusForEnd(event));
+    const finalState = event.state || event.status || 'completed';
+    if (event.summary || event.message || event.error) {
+      addEvent({
+        level: finalState === 'failed' ? 'error' : finalState === 'blocked_on_human' ? 'gate' : 'done',
+        phase: 'result',
+        message: event.summary || event.message || event.error,
+      });
+    }
+    setStatus(finalState);
+    closeLiveUpdates();
     setRunControls(false);
-    $('resumeBtn').disabled = !(event.state === 'paused' || event.state === 'blocked_on_human' || event.state === 'recoverable');
-    closeStream();
     refreshTrace().catch(() => {});
     refreshControlPlane().catch(() => {});
     return;
@@ -706,270 +1025,334 @@ function handleLiveEvent(event) {
   addEvent(event);
 }
 
-$('runBtn').addEventListener('click', async () => {
-  closeStream();
-  const validationError = validateRunInput();
-  if (validationError) {
+async function startRun() {
+  const values = validateRunInput();
+  if (values.error) {
     setStatus('failed');
-    addEvent({ level: 'error', phase: 'input', message: validationError });
-    setRunControls(false);
+    addEvent({ level: 'error', phase: 'input', message: values.error });
     return;
   }
-
-  $('timeline').innerHTML = '<div class="empty">Starting runtime...</div>';
-  $('spans').innerHTML = '<div class="empty" style="padding:8px 0">No spans yet.</div>';
-  $('runDir').textContent = '-';
-  $('traceDir').textContent = '-';
-  $('tracePath').textContent = '-';
-  $('spanCount').textContent = '0';
-  runId = null;
-  activeRuntime = runtime;
-  activeMode = runtimeMode();
-  $('runId').textContent = 'starting...';
-  updateRunMeta();
-  riskTimelineKeys = new Set();
-  renderMetrics(null);
-  renderRiskDecisions(null);
+  resetRunView();
   setStatus('running');
   setRunControls(true);
-
   try {
-    const mode = activeMode;
-    const prompt = $('prompt').value.trim();
-    const url = $('url').value.trim();
-    const started = await api(activeRuntimeInfo().runPath, {
+    const input = await buildGenericSnapshot(values.url, values.prompt, $('headless').checked);
+    const started = await api('/api/runs', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
+        schemaVersion: 'run-client-create/v1',
+        input,
         idempotencyKey: `ui-create-${crypto.randomUUID()}`,
-        runtime,
-        mode,
-        startUrl: url,
-        headless: $('headless').checked,
-        prompt,
-        taskPrompt: prompt,
       }),
     });
-    runId = started.runId;
-    activeRunRevision = started.revision;
-    $('runId').textContent = runId;
-    updateRunMeta({ mode, runId });
-    events = await openEventStream(activeRuntimeInfo().eventsPath(runId), handleLiveEvent);
-    traceTimer = setInterval(() => refreshTrace().catch(() => {}), 1200);
+    updateRunMeta(started);
+    setStatus(started.state || 'running');
+    eventStream = await openEventStream(`/api/events?id=${encodeURIComponent(runId)}`, handleLiveEvent);
+    traceTimer = setInterval(() => refreshTrace().catch(() => {}), 1400);
+    await refreshControlPlane();
   } catch (error) {
-    if (!runId) {
-      activeRuntime = null;
-      activeMode = null;
-      $('runId').textContent = 'no run';
-      updateRunMeta();
-    }
     setStatus('failed');
     setRunControls(false);
     addEvent({ level: 'error', phase: 'run', message: error.message || String(error) });
   }
-});
-
-function finalStatusForEnd(event) {
-  if (event.state === 'failed' || event.state === 'cancelled') return event.state === 'failed' ? 'failed' : 'done';
-  if (event.state === 'paused' || event.state === 'blocked_on_human' || event.state === 'recoverable') return 'blocked';
-  if (event.exitCode !== undefined) return event.exitCode === 0 ? 'done' : 'failed';
-  if (event.finalState === 'error') return 'failed';
-  if (event.finalState === 'blocked' || event.finalState === 'login_required' || event.finalState === 'direct_submit_review' || event.finalState === 'stopped_at_submit') return 'blocked';
-  return 'done';
 }
 
-function controlPayload(action) {
-  return {
-    expectedRevision: activeRunRevision,
-    idempotencyKey: `ui-${action}-${crypto.randomUUID()}`,
-  };
-}
-
-$('stopBtn').addEventListener('click', async () => {
-  if (!runId) return;
-  const stopped = await api(activeRuntimeInfo().stopPath(runId), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(controlPayload('cancel')),
-  });
-  activeRunRevision = stopped.revision;
-  setStatus(stopped.state);
-  setRunControls(false);
-});
-
-$('pauseBtn').addEventListener('click', async () => {
-  if (!runId) return;
-  const paused = await api(`/api/runs/${encodeURIComponent(runId)}/pause`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(controlPayload('pause')),
-  });
-  activeRunRevision = paused.revision;
-  $('pauseBtn').disabled = true;
-  addEvent({ level: 'gate', phase: 'control', message: 'Pause requested; waiting for a safe turn boundary.' });
-});
-
-$('resumeBtn').addEventListener('click', async () => {
+async function stopRun() {
   if (!runId) return;
   try {
-    const resumed = await api(`/api/runs/${encodeURIComponent(runId)}/resume`, {
+    const stopped = await api(`/api/runs/${encodeURIComponent(runId)}/cancel`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(controlPayload('resume')),
+      body: JSON.stringify({
+        schemaVersion: 'run-client-control/v1',
+        expectedRevision: activeRunRevision,
+        idempotencyKey: `ui-cancel-${crypto.randomUUID()}`,
+      }),
     });
-    activeRunRevision = resumed.revision;
-    setStatus('running');
-    setRunControls(true);
-    closeStream();
-    events = await openEventStream(activeRuntimeInfo().eventsPath(runId), handleLiveEvent);
-    traceTimer = setInterval(() => refreshTrace().catch(() => {}), 1200);
+    updateRunMeta(stopped);
+    setStatus(stopped.state);
+    $('stopBtn').disabled = true;
   } catch (error) {
-    addEvent({ level: 'warn', phase: 'control', message: error.message || String(error) });
+    addEvent({ level: 'error', phase: 'control', message: error.message || String(error) });
   }
-});
+}
+
+async function refreshTrace() {
+  if (!runId) return;
+  const trace = await api(`/api/runs/${encodeURIComponent(runId)}/trace`);
+  updateRunMeta(trace);
+  $('spanCount').textContent = String(trace.spans?.length || 0);
+  renderMetrics(trace.metrics || null);
+  renderRiskDecisions(trace.riskDecisions || null);
+  appendRiskTimeline(trace.riskDecisions?.decisions || []);
+  renderSpans(trace.spans || []);
+}
+
+function renderMetrics(metrics) {
+  $('metricsEmpty').hidden = Boolean(metrics);
+  $('metricsGrid').hidden = !metrics;
+  if (!metrics) return;
+  $('metricDuration').textContent = formatDuration(metrics.durationMs);
+  $('metricLlmCalls').textContent = String(metrics.llmCalls ?? 0);
+  $('metricToolCalls').textContent = String(metrics.toolCalls ?? 0);
+  $('metricSnapshots').textContent = String(metrics.browserSnapshots ?? 0);
+  $('metricClicks').textContent = String(metrics.browserClicks ?? 0);
+  $('metricScreenshots').textContent = String(metrics.screenshots ?? 0);
+}
+
+function formatDuration(value) {
+  const ms = Number(value || 0);
+  if (!Number.isFinite(ms) || ms <= 0) return '0ms';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`;
+}
+
+function renderRiskDecisions(artifact) {
+  const decisions = Array.isArray(artifact?.decisions) ? artifact.decisions : [];
+  $('riskEmpty').hidden = decisions.length > 0;
+  $('riskContent').hidden = decisions.length === 0;
+  if (!decisions.length) {
+    $('riskList').innerHTML = '';
+    return;
+  }
+  const summary = artifact.summary || {};
+  $('riskAutoAllowed').textContent = String(summary.autoAllowed ?? countDecision(decisions, 'auto_allow'));
+  $('riskGated').textContent = String(summary.gated ?? countDecision(decisions, 'ask'));
+  $('riskDenied').textContent = String(summary.denied ?? countDecision(decisions, 'deny'));
+  const root = $('riskList');
+  root.innerHTML = '';
+  for (const decision of decisions.slice(-6).reverse()) {
+    const row = document.createElement('div');
+    row.className = 'risk-row';
+    row.innerHTML = '<div class="risk-head"><span class="chip"></span><span class="chip"></span><span class="risk-tool"></span></div><div class="risk-meta"></div>';
+    const chips = row.querySelectorAll('.chip');
+    chips[0].className = `chip ${decision.riskLevel || ''}`;
+    chips[0].textContent = decision.risk || decision.riskLevel || 'risk';
+    chips[1].className = `chip ${decision.decision || 'allow'}`;
+    chips[1].textContent = decision.decision || 'allow';
+    row.querySelector('.risk-tool').textContent = decision.action || decision.tool || '';
+    row.querySelector('.risk-meta').textContent = [gateLabel(decision.gateKind), decision.reason].filter(Boolean).join(' · ');
+    root.appendChild(row);
+  }
+}
+
+function countDecision(decisions, value) {
+  return decisions.filter((decision) => decision.decision === value).length;
+}
+
+function gateLabel(kind) {
+  const labels = {
+    final_submit: '最终提交',
+    upload_resume: '文件上传',
+    save_resume: '保存资料',
+    login: '登录',
+    captcha: '验证码',
+  };
+  return labels[kind] || kind || '';
+}
+
+function appendRiskTimeline(decisions) {
+  for (const decision of decisions) {
+    if (!['high', 'critical'].includes(decision.riskLevel) && !['ask', 'deny', 'auto_allow'].includes(decision.decision)) continue;
+    const key = [decision.source, decision.step, decision.tool, decision.decision, decision.timestamp, decision.ruleId].join('|');
+    if (riskTimelineKeys.has(key)) continue;
+    riskTimelineKeys.add(key);
+    const action = decision.action || decision.tool || '敏感动作';
+    const label = gateLabel(decision.gateKind);
+    const outcome = decision.decision === 'ask' ? '等待人工确认' : decision.decision === 'deny' ? '已拒绝' : '已自动放行';
+    addEvent({
+      ts: decision.timestamp,
+      level: decision.source === 'policy' ? 'risk' : 'decision',
+      phase: 'risk',
+      message: `${label || action}：${outcome}${decision.reason ? ` · ${decision.reason}` : ''}`,
+    });
+  }
+}
+
+function renderSpans(spans) {
+  const root = $('spans');
+  root.innerHTML = '';
+  if (!spans.length) {
+    root.innerHTML = '<div class="panel-empty">尚未生成轨迹片段。</div>';
+    return;
+  }
+  for (const span of spans.slice(-30).reverse()) {
+    const row = document.createElement('div');
+    row.className = 'span-row';
+    row.innerHTML = '<div class="span-head"><span class="chip"></span><span class="span-name"></span></div><div class="span-meta"></div>';
+    row.querySelector('.chip').textContent = span.spanType || 'span';
+    row.querySelector('.span-name').textContent = span.toolName || span.name || '';
+    row.querySelector('.span-meta').textContent = `${span.status || '-'} · ${span.latencyMs || 0}ms`;
+    root.appendChild(row);
+  }
+}
+
+function applyRunState(item) {
+  updateRunMeta(item);
+  setStatus(item.state);
+  const running = ['queued', 'running', 'resuming', 'pausing', 'cancelling'].includes(item.state);
+  const terminal = ['completed', 'failed', 'cancelled'].includes(item.state);
+  setRunControls(running);
+  $('stopBtn').disabled = terminal || !runId;
+}
 
 async function refreshControlPlane() {
-  const [runs, approvals] = await Promise.all([api('/api/runs?limit=25'), api('/api/approvals?limit=25')]);
+  const [runs, approvals] = await Promise.all([
+    api('/api/runs?limit=25'),
+    api('/api/approvals?limit=25'),
+  ]);
   renderRunList(runs.items || []);
   renderApprovalList(approvals.items || []);
   const selected = (runs.items || []).find((item) => item.runId === runId);
   if (selected) applyRunState(selected);
 }
 
-function applyRunState(item) {
-  activeRunRevision = item.revision;
-  const running = item.state === 'running' || item.state === 'resuming' || item.state === 'pausing';
-  const resumable = item.state === 'paused' || item.state === 'blocked_on_human' || item.state === 'recoverable';
-  const terminal = item.state === 'completed' || item.state === 'failed' || item.state === 'cancelled';
-  setStatus(running ? 'running' : item.state === 'failed' ? 'failed' : resumable ? 'blocked' : item.state);
-  $('runBtn').disabled = !connected || running;
-  $('stopBtn').disabled = terminal;
-  $('pauseBtn').disabled = !running || item.state === 'pausing';
-  $('resumeBtn').disabled = !resumable;
+function renderRunList(items) {
+  $('runCount').textContent = String(items.length);
+  const root = $('runList');
+  root.innerHTML = '';
+  if (!items.length) {
+    root.innerHTML = '<div class="history-empty">还没有任务。启动第一个通用网页任务吧。</div>';
+    return;
+  }
+  for (const item of items) {
+    const button = document.createElement('button');
+    button.className = `run-row ${item.runId === runId ? 'selected' : ''}`.trim();
+    button.type = 'button';
+    button.innerHTML = '<div class="run-row-head"><span class="run-row-title">网页任务</span><span class="mini-state"></span></div><div class="run-row-meta"></div>';
+    const state = button.querySelector('.mini-state');
+    state.className = `mini-state ${statusClass(item.state)}`.trim();
+    state.textContent = statusLabel(item.state);
+    button.querySelector('.run-row-meta').textContent = `${item.runId} · r${item.revision}/a${item.attempt}`;
+    button.addEventListener('click', () => selectRun(item.runId).catch((error) => {
+      addEvent({ level: 'error', phase: 'detail', message: error.message || String(error) });
+    }));
+    root.appendChild(button);
+  }
 }
 
 async function selectRun(selectedRunId) {
-  closeStream();
+  closeLiveUpdates();
   const [detail, history] = await Promise.all([
     api(`/api/runs/${encodeURIComponent(selectedRunId)}`),
     api(`/api/runs/${encodeURIComponent(selectedRunId)}/events`),
   ]);
   runId = detail.runId;
-  activeRunRevision = detail.revision;
-  $('runId').textContent = runId;
-  updateRunMeta({ runId });
+  riskTimelineKeys = new Set();
   applyRunState(detail);
   $('timeline').innerHTML = '';
   for (const event of history.items || []) {
     addEvent({
-      ts: event.timestamp,
-      phase: 'history',
-      message: `${event.type}${event.data ? ` · ${JSON.stringify(event.data)}` : ''}`,
+      timestamp: event.timestamp,
+      type: event.type,
+      level: event.type === 'run_failed' ? 'error' : event.type === 'run_completed' ? 'done' : 'info',
+      message: event.data ? `${event.type} · ${JSON.stringify(event.data)}` : event.type,
     });
   }
   if (!(history.items || []).length) {
-    $('timeline').innerHTML = '<div class="empty">No durable events.</div>';
+    $('timeline').innerHTML = '<div class="timeline-empty"><strong>暂无持久事件</strong>可以刷新轨迹查看运行产物。</div>';
   }
   await refreshTrace();
-}
-
-function renderRunList(items) {
-  const root = $('runList');
-  root.innerHTML = '';
-  if (!items.length) {
-    root.innerHTML = '<div class="metric-empty" style="padding:8px">No durable runs.</div>';
-    return;
+  if (['queued', 'running', 'resuming', 'pausing'].includes(detail.state)) {
+    eventStream = await openEventStream(`/api/events?id=${encodeURIComponent(runId)}`, handleLiveEvent);
+    traceTimer = setInterval(() => refreshTrace().catch(() => {}), 1400);
   }
-  for (const item of items) {
-    const row = document.createElement('div');
-    row.className = 'control-row';
-    const title = document.createElement('div');
-    title.textContent = `${item.state} · web`;
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    meta.textContent = `${item.runId} · r${item.revision}/a${item.attempt}`;
-    row.append(title, meta);
-    row.addEventListener('click', () => selectRun(item.runId).catch((error) => {
-      addEvent({ level: 'error', phase: 'detail', message: error.message || String(error) });
-    }));
-    root.appendChild(row);
-  }
+  await refreshControlPlane();
 }
 
 function renderApprovalList(items) {
+  $('approvalCount').textContent = String(items.length);
   const root = $('approvalList');
   root.innerHTML = '';
   if (!items.length) {
-    root.innerHTML = '<div class="metric-empty" style="padding:8px">No pending approvals.</div>';
+    root.innerHTML = '<div class="panel-empty">当前没有等待确认的动作。</div>';
     return;
   }
   for (const item of items) {
-    const row = document.createElement('div');
-    row.className = 'control-row';
-    const title = document.createElement('div');
-    title.textContent = item.action?.kind || item.action?.actionId || item.approvalId;
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    meta.textContent = `${item.runId} · ${item.action?.destinationOrigin || 'local'}`;
-    const actions = document.createElement('div');
-    actions.className = 'control-links';
+    const card = document.createElement('div');
+    card.className = 'approval-card';
+    card.innerHTML = '<div class="approval-kind"></div><div class="approval-meta"></div><div class="approval-actions"></div>';
+    card.querySelector('.approval-kind').textContent = gateLabel(item.action?.kind) || item.action?.kind || '敏感动作';
+    card.querySelector('.approval-meta').textContent = `${item.runId}${item.action?.destinationOrigin ? ` · ${item.action.destinationOrigin}` : ''}`;
+    const actions = card.querySelector('.approval-actions');
     for (const decision of ['approved', 'denied']) {
       const button = document.createElement('button');
-      button.className = `btn ${decision === 'approved' ? 'secondary' : 'danger'}`;
-      button.textContent = decision === 'approved' ? 'Approve' : 'Deny';
-      button.addEventListener('click', async (event) => {
-        event.stopPropagation();
-        await api(`/api/approvals/${encodeURIComponent(item.approvalId)}/resolve`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ decision, expectedRevision: item.revision }),
-        });
-        await refreshControlPlane();
+      button.className = `btn small ${decision === 'approved' ? 'primary' : 'danger'}`;
+      button.textContent = decision === 'approved' ? '允许一次' : '拒绝';
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try {
+          await api(`/api/approvals/${encodeURIComponent(item.approvalId)}/resolve`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              schemaVersion: 'approval-client-resolve/v1',
+              decision,
+              expectedRevision: item.revision,
+              idempotencyKey: `ui-approval-${crypto.randomUUID()}`,
+            }),
+          });
+          addEvent({
+            level: decision === 'approved' ? 'decision' : 'warn',
+            phase: 'approval',
+            message: decision === 'approved' ? '已允许这一次敏感动作。' : '已拒绝这一次敏感动作。',
+          });
+          await refreshControlPlane();
+        } catch (error) {
+          button.disabled = false;
+          addEvent({ level: 'error', phase: 'approval', message: error.message || String(error) });
+        }
       });
       actions.appendChild(button);
     }
-    row.append(title, meta, actions);
-    root.appendChild(row);
+    root.appendChild(card);
   }
 }
 
-$('refreshBtn').addEventListener('click', () => refreshTrace().catch((error) => addEvent({ level: 'error', phase: 'trace', message: error.message })));
+async function openProtectedJson(linkId, title) {
+  const path = $(linkId).dataset.path;
+  if (!path) return;
+  const viewer = window.open('', '_blank');
+  if (viewer) viewer.opener = null;
+  try {
+    const value = await api(path);
+    if (!viewer) throw new Error('浏览器阻止了新窗口，请允许弹出窗口后重试。');
+    viewer.document.title = title;
+    viewer.document.body.style.cssText = 'margin:0;padding:24px;background:#f7f8fa;color:#172033;';
+    const pre = viewer.document.createElement('pre');
+    pre.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.6 ui-monospace,monospace;';
+    pre.textContent = JSON.stringify(value, null, 2);
+    viewer.document.body.appendChild(pre);
+  } catch (error) {
+    viewer?.close();
+    addEvent({ level: 'error', phase: 'api', message: error.message || String(error) });
+  }
+}
 
 $('connectBtn').addEventListener('click', () => connectService().catch((error) => {
-  connected = false;
-  serviceToken = '';
-  $('authState').textContent = 'failed';
-  $('runBtn').disabled = true;
-  $('refreshBtn').disabled = true;
   setStatus('failed');
   addEvent({ level: 'error', phase: 'auth', message: error.message || String(error) });
 }));
 $('serviceToken').addEventListener('keydown', (event) => {
   if (event.key === 'Enter') $('connectBtn').click();
 });
-for (const id of ['traceLink', 'artifactLink']) {
-  $(id).addEventListener('click', async (event) => {
-    event.preventDefault();
-    const path = event.currentTarget.dataset.path;
-    if (!path) return;
-    const viewer = window.open('', '_blank');
-    if (viewer) viewer.opener = null;
-    try {
-      const value = await api(path);
-      if (!viewer) throw new Error('The browser blocked the protected API viewer.');
-      viewer.document.title = id === 'traceLink' ? 'Run Trace' : 'Run Artifacts';
-      viewer.document.body.innerHTML = '';
-      const pre = viewer.document.createElement('pre');
-      pre.textContent = JSON.stringify(value, null, 2);
-      viewer.document.body.appendChild(pre);
-    } catch (error) {
-      viewer?.close();
-      addEvent({ level: 'error', phase: 'api', message: error.message || String(error) });
-    }
-  });
-}
+$('runBtn').addEventListener('click', startRun);
+$('stopBtn').addEventListener('click', stopRun);
+$('refreshBtn').addEventListener('click', () => refreshTrace().catch((error) => {
+  addEvent({ level: 'error', phase: 'trace', message: error.message || String(error) });
+}));
+$('traceLink').addEventListener('click', (event) => {
+  event.preventDefault();
+  openProtectedJson('traceLink', 'Web Agent Trace');
+});
+$('artifactLink').addEventListener('click', (event) => {
+  event.preventDefault();
+  openProtectedJson('artifactLink', 'Web Agent Artifacts');
+});
+
 setInterval(() => {
-  if (serviceToken) refreshControlPlane().catch(() => {});
+  if (connected) refreshControlPlane().catch(() => {});
 }, 5000);
 </script>
 </body>

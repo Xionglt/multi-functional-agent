@@ -95,12 +95,17 @@ import type { ToolCall } from '../../tools/tool-contract.js'
 import {
   digestCanonicalJson,
   type ActionBinding,
+  type ActionOutcome,
   type ApprovalBinding,
+  type ArtifactRef,
+  type CompletionFormState,
   type ContextItem,
   type EvidenceRef,
+  type SensitiveActionKind,
   type TaskContract,
   type TaskPolicy,
 } from '../../task/contracts.js'
+import { ActionLedger, type ActionLedgerEntry } from '../../task/action-ledger.js'
 import {
   createSinkActionBinding,
   destinationOriginForTool,
@@ -135,6 +140,7 @@ import {
 } from '../../tools/tool-result-store.js'
 import {
   completionGate as defaultCompletionGate,
+  deriveCompletionFormState,
   type CompletionGateDecision,
   type CompletionGateInput,
   type WebBuddyTaskType,
@@ -153,6 +159,7 @@ import type {
   MainCompletionReadinessV1,
   TaskNotificationPromptAttachmentV1,
 } from '../../agents/async-task-contracts.js'
+import { assembleCompletionArtifacts } from './result-assembler.js'
 
 export interface AgentEvent {
   step: number
@@ -229,6 +236,8 @@ export interface AgentLoopInput {
   completionGate?: AgentLoopCompletionGate
   /** Optional store for large tool-result artifacts. Defaults to the run trace artifact directory. */
   toolResultStore?: ToolResultStore
+  /** Runtime-owned sensitive-action audit ledger. */
+  actionLedger?: ActionLedger
   /** Trusted write-time sanitizer supplied by an embedding service secret provider. */
   persistenceSanitizer?: (value: unknown) => unknown
   /** Trusted rollout controls; `parallel` is a narrow Wave-5 allowlisted path. */
@@ -254,6 +263,9 @@ export interface AgentLoopResult {
   summary: string
   workflowState?: WorkflowState
   evidence?: EvidenceRef[]
+  artifacts?: ArtifactRef[]
+  formState?: CompletionFormState
+  actions?: ActionOutcome[]
 }
 
 export interface AgentLoopPermissionEngine {
@@ -394,7 +406,13 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   const workflowEngine = input.workflowEngine ?? defaultWorkflowEngine
   const completionGate = input.completionGate ?? defaultCompletionGate
   const workflowEvidenceStore = new EvidenceStore()
+  const completionArtifacts: ArtifactRef[] = []
+  const actionLedger = input.actionLedger ?? new ActionLedger()
+  const monitoredActionKinds: SensitiveActionKind[] = input.taskContract?.criteria.flatMap((criterion) => (
+    criterion.kind === 'action_boundary' ? criterion.actionKinds : []
+  )) ?? []
   const session = input.session
+  const completionActions = (): ActionOutcome[] => actionLedger.outcomes(monitoredActionKinds)
   const completionContractFields = () => {
     const runId = session?.session.runId ?? ctx.trace.runId
     const revision = input.taskContract?.revision ?? 0
@@ -408,18 +426,41 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         revision,
         session?.session.sessionId ?? ctx.sessionId,
       )),
-      artifacts: [],
-      actions: input.taskContract?.criteria.flatMap((criterion) =>
-        criterion.kind === 'action_boundary' && criterion.outcome === 'not_performed'
-          ? criterion.actionKinds.filter((kind) => kind === 'submit').map((actionKind) => ({ actionKind, outcome: 'not_performed' as const }))
-          : [],
-      ) ?? [],
+      artifacts: completionArtifacts,
+      actions: completionActions(),
     }
   }
   const toolResultStore = input.toolResultStore ?? new FileToolResultStore({
     rootDir: join(ctx.trace.agentTrace?.dir ?? ctx.trace.dir, 'artifacts', 'tool-results'),
     sanitize: input.persistenceSanitizer,
   })
+
+  const assembleResultArtifacts = async (candidateSummary: string): Promise<void> => {
+    const runId = session?.session.runId ?? ctx.trace.runId
+    const revision = input.taskContract?.revision ?? 0
+    const evidence = workflowEvidenceStore.snapshot().evidence.map((item) => workflowEvidenceRef(
+      item,
+      runId,
+      revision,
+      session?.session.sessionId ?? ctx.sessionId,
+    ))
+    const assembled = await assembleCompletionArtifacts({
+      goal,
+      summary: candidateSummary,
+      contract: input.taskContract,
+      contextItems,
+      evidence,
+      existingArtifacts: completionArtifacts,
+      runId,
+      revision,
+      sessionId: session?.session.sessionId ?? ctx.sessionId,
+      store: toolResultStore,
+    })
+    for (const artifact of assembled.slice(completionArtifacts.length)) {
+      completionArtifacts.push(artifact)
+      ctx.trace.agentTrace?.recordEvent('completion_artifact_created', { artifact })
+    }
+  }
 
   let step = 0
   let toolCalls = 0
@@ -472,6 +513,15 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     sessionAction('workflow', () => session!.workflow(state))
   const sessionStatus = async (status: AgentSessionStatus, patch?: Parameters<SessionRecorder['updateStatus']>[1]) =>
     sessionAction('status', () => session!.updateStatus(status, patch))
+  const recordActionLedgerEntry = async (entry: ActionLedgerEntry) => {
+    ctx.trace.agentTrace?.recordEvent('action_ledger_updated', { entry })
+    await sessionEvent({
+      type: 'action_ledger_updated',
+      toolCallId: entry.actionId.split(':').at(-1),
+      message: `${entry.actionKind}: ${entry.status}`,
+      data: { entry },
+    })
+  }
   const recordRunMemorySnapshot = async (reason: string, currentStep: number, turnId?: string, toolCallId?: string) => {
     const memory = compactRunMemory(runMemory)
     ctx.trace.agentTrace?.recordEvent('memory_updated', {
@@ -1135,7 +1185,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     if (contextWorkflow.changed) {
       latestContext = await refreshLoopContext(`Workflow handoff ${handoffKind} changed context.`, currentStep)
     }
-    return workflowHandoffSummary(workflowState)
+    return workflowHandoffSummaryForTask(workflowState, input.taskContract)
   }
   const resolveResumableWorkflowHandoff = async (
     currentStep: number,
@@ -1179,7 +1229,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   if (initialWorkflow.changed) {
     latestContext = await refreshLoopContext('Initial workflow changed context.', step)
   }
-  const initialHandoffSummary = workflowHandoffSummary(workflowState)
+  const initialHandoffSummary = workflowHandoffSummaryForTask(workflowState, input.taskContract)
   if (initialHandoffSummary) {
     const handoff = await resolveResumableWorkflowHandoff(step, initialHandoffSummary)
     if (!handoff.resumed) {
@@ -1452,6 +1502,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     // No tool calls → model is done (or narrating). Treat as final.
     if (completion.toolCalls.length === 0) {
       summary = completion.content.trim() || 'model produced no further tool calls'
+      await assembleResultArtifacts(summary)
       const mainCompletionReadiness = await asyncCompletionReadiness()
       if (mainCompletionReadiness?.state === 'blocked_required_tasks'
         && mainCompletionReadiness.pendingOrRunningTaskIds.length > 0
@@ -1769,6 +1820,14 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         freshness: latestContext.freshness,
       })
       const sinkActionKind = sensitiveActionKindForTool(call.name, policyDecision.gateKind, call.arguments)
+      const ledgerActionId = sinkActionKind ? `${turnId}:${call.id}` : undefined
+      if (sinkActionKind && ledgerActionId) {
+        await recordActionLedgerEntry(actionLedger.propose({
+          actionId: ledgerActionId,
+          actionKind: sinkActionKind,
+          toolName: call.name,
+        }))
+      }
       const sinkSourceItems = contextItems.filter((item) => item.allowedUses.includes('sink'))
       const sinkSourceOrigin = originForUrl(currentUrl)
       const sinkDestinationOrigin = destinationOriginForTool(call.name, call.arguments, currentUrl)
@@ -1875,6 +1934,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       let sinkApprovalBinding: ApprovalBinding | undefined
 
       if (permissionDecision.action === 'deny') {
+        if (ledgerActionId) {
+          await recordActionLedgerEntry(actionLedger.deny(ledgerActionId, permissionDecision.reason))
+        }
         const note = `BLOCKED by permission [${permissionDecision.ruleId}]. ${permissionDecision.reason}`
         const observation = noteWithPermission(note, policyDecision, permissionDecision)
         await materializeTerminal(call, index, 'EARLIER_TOOL_BLOCKED', observation)
@@ -1924,6 +1986,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       }
 
       if (permissionDecision.action === 'allow') {
+        if (ledgerActionId) {
+          await recordActionLedgerEntry(actionLedger.authorize(ledgerActionId, permissionDecision.reason))
+        }
         if (policyDecision.action === 'auto_confirm') markConfirmed(call)
       } else if (permissionDecision.action === 'ask') {
         const approval = await enqueueApproval(permissionRequest, permissionDecision, step)
@@ -1961,7 +2026,12 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             nonce: `${resolvedApproval.approvalId}:${sinkActionBinding.actionId}`,
           }
         }
-        await rememberPermissionDecision({
+        if (ledgerActionId) {
+          await recordActionLedgerEntry(decision === 'approve'
+            ? actionLedger.authorize(ledgerActionId, `Human gate approved ${kind}.`)
+            : actionLedger.deny(ledgerActionId, `Human gate resolved ${decision} for ${kind}.`))
+        }
+        const rememberedPermission = await rememberPermissionDecision({
           input,
           request: permissionRequest,
           permissionDecision,
@@ -1970,6 +2040,21 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           step,
           emit,
         })
+        if (rememberedPermission.attempted) {
+          const memoryActionId = `${turnId}:${call.id}:permission-write`
+          await recordActionLedgerEntry(actionLedger.propose({
+            actionId: memoryActionId,
+            actionKind: 'permission_write',
+            toolName: 'permission_rule_store',
+          }))
+          await recordActionLedgerEntry(actionLedger.authorize(
+            memoryActionId,
+            `Human selected remember scope ${gateResponse.rememberScope}.`,
+          ))
+          await recordActionLedgerEntry(rememberedPermission.performed
+            ? actionLedger.perform(memoryActionId, rememberedPermission.reason)
+            : actionLedger.fail(memoryActionId, rememberedPermission.reason))
+        }
         await sessionEvent({
           type: 'human_gate_resolved',
           turnId,
@@ -2011,6 +2096,12 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             : `FINAL_SUBMIT_NOT_EXECUTED_AUTOMATICALLY. The human chose ${decision} for this final-submit step. Do not retry this exact final-submit action; continue with any remaining safe checks or call agent_done if no safe work remains.`
           const observation = noteWithPermission(note, policyDecision, permissionDecision)
           await materializeTerminal(call, index, 'EARLIER_TOOL_BLOCKED', observation)
+          if (decision === 'approve' && ledgerActionId) {
+            await recordActionLedgerEntry(actionLedger.skip(
+              ledgerActionId,
+              'Runtime deliberately stopped before final submission.',
+            ))
+          }
           if (decision !== 'approve') {
             blockers.push(`final_submit gate did not execute ${call.name}(${argBrief}) with decision=${decision}: ${permissionDecision.reason}`)
           }
@@ -2101,6 +2192,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           consumedApprovalNonces: consumedSinkApprovalNonces,
         })
         if (sinkDecision.action !== 'allow') {
+          if (ledgerActionId) {
+            await recordActionLedgerEntry(actionLedger.deny(ledgerActionId, sinkDecision.reason))
+          }
           const observation = `BLOCKED by sink policy [${sinkDecision.reasonCode}]. ${sinkDecision.reason}`
           await materializeTerminal(call, index, 'EARLIER_TOOL_BLOCKED', observation)
           blockers.push(observation)
@@ -2292,6 +2386,11 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         }
         result = toLegacyToolRunResult(execution)
       }
+      if (ledgerActionId) {
+        await recordActionLedgerEntry((execution?.ok ?? false)
+          ? actionLedger.perform(ledgerActionId, 'Tool execution succeeded.')
+          : actionLedger.fail(ledgerActionId, execution?.error?.message ?? 'Tool execution failed.'))
+      }
       if (controlled && execution) {
         controlled.runOutcome.resolve({
           schemaVersion: 'tool-run-outcome/v1',
@@ -2419,8 +2518,29 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       })
       const userAnswer = userAnswerFromToolResult(result)
       if (call.name === 'ask_user' && userAnswer) {
-        if (input.persistentAnswerStore && !toolResultReusedSavedAnswer(result)) {
-          await ctx.answerStore?.save(input.persistentAnswerStore.path, userAnswer.at)
+        if (input.persistentAnswerStore
+          && !toolResultReusedSavedAnswer(result)
+          && taskPolicyAllowsRuntimeWrite(input.taskPolicy, 'memory_write', false)) {
+          const memoryActionId = `${turnId}:${call.id}:memory-write`
+          await recordActionLedgerEntry(actionLedger.propose({
+            actionId: memoryActionId,
+            actionKind: 'memory_write',
+            toolName: 'answer_store',
+          }))
+          await recordActionLedgerEntry(actionLedger.authorize(
+            memoryActionId,
+            'TaskPolicy allows storing this direct user answer.',
+          ))
+          try {
+            await ctx.answerStore?.save(input.persistentAnswerStore.path, userAnswer.at)
+            await recordActionLedgerEntry(actionLedger.perform(memoryActionId, 'User answer persisted.'))
+          } catch (error) {
+            await recordActionLedgerEntry(actionLedger.fail(
+              memoryActionId,
+              error instanceof Error ? error.message : String(error),
+            ))
+            throw error
+          }
         }
         await sessionTranscript({
           type: 'user_answer',
@@ -2454,6 +2574,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         done = true
         blocked = Boolean((result.data as { blocked?: boolean } | undefined)?.blocked)
         summary = (call.arguments.summary as string) || result.observation
+        if (!blocked) await assembleResultArtifacts(summary)
       }
       let completionGateDecision: CompletionGateDecision | undefined
       let completionGateBlockSummary: string | undefined
@@ -2771,7 +2892,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         latestContext = await refreshLoopContext('Workflow refresh changed prompt context.', step)
         syncFillLedgerSummary(latestContext)
       }
-      const handoffSummary = workflowHandoffSummary(workflowState)
+      const handoffSummary = workflowHandoffSummaryForTask(workflowState, input.taskContract)
       if (handoffSummary) {
         const handoff = await resolveResumableWorkflowHandoff(step, handoffSummary)
         if (!handoff.resumed) {
@@ -2848,6 +2969,18 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       input.taskContract?.revision ?? 0,
       input.session?.session.sessionId ?? ctx.sessionId,
     )),
+    artifacts: completionArtifacts,
+    ...(latestContext.form || input.taskContract?.criteria.some((criterion) => criterion.kind === 'form_state')
+      ? {
+          formState: deriveCompletionFormState({
+            page: latestContext.page,
+            form: latestContext.form,
+            formCoverage: latestFormCoverage(latestContext),
+            workflowState,
+          }),
+        }
+      : {}),
+    actions: completionActions(),
   }
 }
 
@@ -3062,6 +3195,12 @@ function isFinalSubmitBoundaryActive(
   return evaluation?.blockers.some((blocker) => (
     blocker.gateKind === 'final_submit' ||
     /final[-_\s]?submit|final submission|manual takeover/i.test(blocker.message)
+  )) === true
+}
+
+function isDraftOnlyTaskContract(contract: TaskContract | undefined): boolean {
+  return contract?.criteria.some((criterion) => (
+    criterion.kind === 'form_state' && criterion.requireDraftOnly
   )) === true
 }
 
@@ -3323,6 +3462,14 @@ function workflowHandoffSummary(workflowState: WorkflowState): string | undefine
   if (workflowState.phase === 'external_blocker') return workflowState.blocker ?? 'External blocker requires human action before continuing.'
   if (workflowState.phase === 'final_submit_boundary') return workflowState.blocker ?? 'Final submit requires human takeover before completion.'
   return undefined
+}
+
+function workflowHandoffSummaryForTask(
+  workflowState: WorkflowState,
+  contract: TaskContract | undefined,
+): string | undefined {
+  if (isDraftOnlyTaskContract(contract) && workflowState.phase === 'final_submit_boundary') return undefined
+  return workflowHandoffSummary(workflowState)
 }
 
 function workflowHandoffKind(workflowState: WorkflowState): Extract<GateKind, 'login' | 'captcha'> | undefined {
@@ -3595,11 +3742,12 @@ async function rememberPermissionDecision(input: {
   rememberScope?: Extract<PermissionRememberScope, 'session' | 'always'>
   step: number
   emit: (level: AgentEvent['level'], message: string, step: number) => void
-}): Promise<void> {
-  if (!input.input.persistentPermissionRules?.path) return
-  if (input.gateDecision !== 'approve') return
-  if (!input.rememberScope) return
-  if (!input.permissionDecision.remember.supportedScopes.includes(input.rememberScope)) return
+}): Promise<{ attempted: false } | { attempted: true; performed: boolean; reason: string }> {
+  if (!input.input.persistentPermissionRules?.path) return { attempted: false }
+  if (input.gateDecision !== 'approve') return { attempted: false }
+  if (!input.rememberScope) return { attempted: false }
+  if (!input.permissionDecision.remember.supportedScopes.includes(input.rememberScope)) return { attempted: false }
+  if (!taskPolicyAllowsRuntimeWrite(input.input.taskPolicy, 'permission_write', true)) return { attempted: false }
 
   const rule = persistentPermissionRuleFromDecision({
     id: rememberedPermissionRuleId(input.request, input.rememberScope),
@@ -3612,14 +3760,27 @@ async function rememberPermissionDecision(input: {
     request: input.request,
     rememberScope: input.rememberScope,
   })
-  if (!rule) return
+  if (!rule) return { attempted: false }
 
   try {
     await appendPersistentPermissionRule(input.input.persistentPermissionRules.path, rule)
     input.emit('decision', `Remembered permission (${input.rememberScope}) for ${permissionSubjectLabel(input.request)}.`, input.step)
+    return { attempted: true, performed: true, reason: 'Permission rule persisted.' }
   } catch (error) {
-    input.emit('warn', `Permission remember write failed: ${error instanceof Error ? error.message : String(error)}`, input.step)
+    const reason = error instanceof Error ? error.message : String(error)
+    input.emit('warn', `Permission remember write failed: ${reason}`, input.step)
+    return { attempted: true, performed: false, reason }
   }
+}
+
+function taskPolicyAllowsRuntimeWrite(
+  policy: TaskPolicy | undefined,
+  actionKind: Extract<SensitiveActionKind, 'memory_write' | 'permission_write'>,
+  explicitlyApproved: boolean,
+): boolean {
+  if (!policy) return true
+  const rule = policy.rules.find((candidate) => candidate.actionKinds.includes(actionKind))
+  return explicitlyApproved && (rule?.decision ?? policy.defaultSensitiveAction) === 'ask'
 }
 
 function rememberedPermissionRuleId(

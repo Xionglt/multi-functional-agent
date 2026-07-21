@@ -292,11 +292,26 @@ Agent Loop.
 
 ```text
 runWebTask
-  -> AgentKernel / runAgentLoop
-    -> TaskPolicy + PermissionEngine
-      -> durable Human Gate when required
-        -> ToolExecutionService
+  -> RuntimeAssembler (task profile, session, memory, async workers, tool mode)
+    -> AgentKernel / runAgentLoop
+      -> Context (task input + governed memory + advisory async artifacts)
+      -> Prepare: TaskPolicy + PermissionEngine
+        -> durable Human Gate when required
+          -> ToolOrchestrator / ToolExecutionService
+            -> ActionLedger + EvidenceStore
+              -> CompletionGate + ResultAssembler
 ```
+
+The built-in Runtime derives an explicit task profile. Research/comparison runs
+may receive trusted read-only async workers when a host factory is supplied;
+form and final-review profiles keep foreground effects serial. The ActionLedger
+is the authoritative source for `approved`, `performed`, and `not_performed`
+completion outcomes. Contract-required result artifacts are produced through a
+schema materializer registry rather than scenario-specific Agent Loop branches.
+
+Local SDK runs use the existing local memory files. Tenant-owned Web service
+runs retrieve MemoryLifecycle records through the exact owner scope and inject
+them only as `data_only` ContextItems; auth/secret records never enter prompts.
 
 The Web service stores Run and Approval state through `RunService` and durable
 Stores. Pause is a request acknowledged only at a safe turn boundary; it is not

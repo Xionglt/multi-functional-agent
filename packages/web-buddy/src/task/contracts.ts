@@ -413,6 +413,8 @@ export interface WebTaskResult {
   summary: string
   evidence: EvidenceRef[]
   artifacts: ArtifactRef[]
+  formState?: CompletionFormState
+  actions?: ActionOutcome[]
   metrics: RunMetrics
   sessionRef?: SessionRef
   checkpointRef?: CheckpointRef

@@ -332,6 +332,19 @@ export interface ArtifactRef {
   scanner: { status: 'clean' | 'quarantined' | 'rejected' | 'not_scanned'; scannerId: string }
 }
 
+export interface CompletionFormState {
+  audited: boolean
+  requiredFieldCoverage: number
+  visibleErrorCount: number
+  submitted: boolean
+}
+
+export interface ActionOutcome {
+  actionKind: SensitiveActionKind
+  outcome: 'not_performed' | 'approved' | 'performed'
+  actionId?: string
+}
+
 export type RunLifecycleState =
   | 'queued'
   | 'running'
@@ -422,6 +435,8 @@ export interface WebTaskResult {
   summary: string
   evidence: EvidenceRef[]
   artifacts: ArtifactRef[]
+  formState?: CompletionFormState
+  actions?: ActionOutcome[]
   metrics: RunMetrics
   sessionRef?: SessionRef
   checkpointRef?: CheckpointRef

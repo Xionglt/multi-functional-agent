@@ -51,15 +51,19 @@ export async function assembleCompletionArtifacts(input: ResultAssemblerInput): 
       && (!criterion.schemaVersions?.length || criterion.schemaVersions.includes(item.payloadSchemaVersion))).length >= criterion.minCount) {
       continue
     }
-    const artifactKind = criterion.artifactKinds[0]
-    const payloadSchemaVersion = criterion.schemaVersions?.[0]
-    if (!artifactKind || !payloadSchemaVersion) continue
-    const materializer = MATERIALIZERS.find((candidate) => candidate.supports({
-      artifactKind,
-      payloadSchemaVersion,
-      contract: input.contract!,
-    }))
-    if (!materializer) continue
+    const materialized = criterion.artifactKinds.flatMap((artifactKind) => (
+      (criterion.schemaVersions ?? []).map((payloadSchemaVersion) => ({
+        artifactKind,
+        payloadSchemaVersion,
+        materializer: MATERIALIZERS.find((candidate) => candidate.supports({
+          artifactKind,
+          payloadSchemaVersion,
+          contract: input.contract!,
+        })),
+      }))
+    )).find((candidate) => candidate.materializer)
+    if (!materialized?.materializer) continue
+    const { artifactKind, payloadSchemaVersion, materializer } = materialized
     const stored = await input.store.write({
       runId: input.runId,
       sessionId: input.sessionId,

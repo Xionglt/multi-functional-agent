@@ -95,6 +95,55 @@ try {
   assert.equal(artifacts[0].kind, 'comparison_report')
   assert.match(artifacts[0].producer.id, /^result-assembler:/)
 
+  const fallbackArtifacts = await assembleCompletionArtifacts({
+    goal: 'Compare options with a fallback artifact contract.',
+    summary: 'Option A is still less expensive.',
+    contract: {
+      schemaVersion: 'web-task-contract/v1',
+      contractId: 'materializer-fallback-contract',
+      revision: 0,
+      criteria: [{
+        kind: 'artifact_present', id: 'fallback-report', description: 'supported fallback report',
+        artifactKinds: ['unsupported_report', 'comparison_report'], minCount: 1,
+        schemaVersions: ['unsupported/v1', 'comparison-report/v1'],
+      }],
+    },
+    contextItems: [contextItem('comparison.fallback', 'comparison_option', { label: 'A', facts: { price: 10 } })],
+    evidence: [],
+    existingArtifacts: [],
+    runId: 'runtime-assembly-fallback-run',
+    revision: 0,
+    sessionId: 'runtime-assembly-fallback-session',
+    store,
+    now: () => new Date('2026-07-21T00:00:00.000Z'),
+  })
+  assert.equal(fallbackArtifacts.length, 1)
+  assert.equal(fallbackArtifacts[0].kind, 'comparison_report')
+  assert.equal(fallbackArtifacts[0].payloadSchemaVersion, 'comparison-report/v1')
+
+  const unsupportedArtifacts = await assembleCompletionArtifacts({
+    goal: 'Request an unsupported artifact.',
+    summary: 'No registered materializer can produce this artifact.',
+    contract: {
+      schemaVersion: 'web-task-contract/v1',
+      contractId: 'unsupported-materializer-contract',
+      revision: 0,
+      criteria: [{
+        kind: 'artifact_present', id: 'unsupported-report', description: 'unsupported report',
+        artifactKinds: ['unsupported_report'], minCount: 1,
+        schemaVersions: ['unsupported/v1'],
+      }],
+    },
+    contextItems: [],
+    evidence: [],
+    existingArtifacts: [],
+    runId: 'runtime-assembly-unsupported-run',
+    revision: 0,
+    sessionId: 'runtime-assembly-unsupported-session',
+    store,
+  })
+  assert.equal(unsupportedArtifacts.length, 0)
+
   const memoryItems = await retrieveLifecycleMemoryContext({
     service: {
       async retrieve() {

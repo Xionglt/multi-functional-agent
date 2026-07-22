@@ -1328,6 +1328,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       turnId,
       step,
       messages,
+      tools,
       systemContent: renderSystemContext(latestContext),
       tokenBudgetOptions: tokenBudgetOptionsForLoop(input),
       keepRecentMessages: input.contextBudget?.keepRecentMessages,
@@ -1355,6 +1356,22 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         tokenBudget: compaction.tokenBudget,
         ...(compaction.postMicroTokenBudget ? { postMicroTokenBudget: compaction.postMicroTokenBudget } : {}),
         ...(compaction.microCompaction?.applied ? { microCompaction: compaction.microCompaction.stats } : {}),
+      },
+    })
+    const requestBudget = compaction.postCompactionTokenBudget
+      ?? compaction.postMicroTokenBudget
+      ?? compaction.tokenBudget
+    ctx.trace.agentTrace?.recordEvent('token_budget_updated', {
+      schemaVersion: 'token-budget-event/v1',
+      turnId,
+      step,
+      requestBudget: {
+        unit: 'estimated_tokens',
+        estimatedRequest: requestBudget.estimatedTotalTokens ?? 0,
+        estimatedMessages: requestBudget.estimatedInputTokens ?? 0,
+        estimatedToolResults: requestBudget.estimatedToolResultTokens ?? 0,
+        estimatedToolSchemas: requestBudget.estimatedToolSchemaTokens ?? 0,
+        selectedTools: requestBudget.selectedToolCount ?? 0,
       },
     })
 

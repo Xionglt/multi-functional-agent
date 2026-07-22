@@ -11,6 +11,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { COMPACTED_RUN_CONTEXT_PREFIX } from '../dist/context/run-summary.js'
+import { estimateTokenBudget } from '../dist/kernel/token-budget.js'
 import { observationManager } from '../dist/observation/observation-manager.js'
 import { ApprovalQueue } from '../dist/permission/index.js'
 import { browserOpen } from '../dist/browser/open.js'
@@ -662,11 +663,24 @@ async function runCompactionScenario() {
 
     const transcript = await readJsonLines(session.session.transcriptPath)
     const events = await readJsonLines(session.session.eventsPath)
+    const traceEvents = readFileSync(join(trace.agentTrace.dir, 'events.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
     const compactionEntry = transcript.find((entry) => entry.type === 'context_compaction')
+    const requestBudgetEvent = traceEvents.find((event) => (
+      event.event === 'token_budget_updated'
+      && event.data?.value?.turnId === 'turn_002'
+    ))
+    const compactedRequest = llm.requests.find((request) => request.messages.some((message) => (
+      message.role === 'user' && message.content.startsWith(COMPACTED_RUN_CONTEXT_PREFIX)
+    )))
 
     assert.equal(result.done, true, 'compaction scenario should finish')
     assert.equal(result.blocked, false, 'compaction scenario should not block')
     assert(llm.sawCompacted, 'LLM should receive COMPACTED_RUN_CONTEXT after compaction')
+    assert(compactedRequest, 'mock LLM should retain the compacted request snapshot')
     assert.equal(markerCalls.length, 1, 'loop should execute a tool after compacting messages')
     assert(compactionEntry, 'transcript should include context_compaction')
     assert.equal(compactionEntry.summary.goal, 'Exercise context compaction integration.')
@@ -690,6 +704,27 @@ async function runCompactionScenario() {
     assert(compactionEntry.summary.completion?.reason, 'context compaction should retain workflow evaluation reason')
     assert(events.some((event) => event.type === 'token_budget_updated'), 'events should include token_budget_updated')
     assert(events.some((event) => event.type === 'context_compacted'), 'events should include context_compacted')
+    assert(requestBudgetEvent, 'Agent Trace should include the final request token budget for the compacted turn')
+    assert.equal(requestBudgetEvent.data.value.schemaVersion, 'token-budget-event/v1')
+    assert.equal(requestBudgetEvent.data.value.requestBudget.unit, 'estimated_tokens')
+    assert.equal(requestBudgetEvent.data.value.requestBudget.selectedTools, 2)
+    assert(requestBudgetEvent.data.value.requestBudget.estimatedToolSchemas > 0)
+    assert.equal(
+      requestBudgetEvent.data.value.requestBudget.estimatedRequest,
+      requestBudgetEvent.data.value.requestBudget.estimatedMessages
+        + requestBudgetEvent.data.value.requestBudget.estimatedToolResults
+        + requestBudgetEvent.data.value.requestBudget.estimatedToolSchemas,
+      'Agent Trace should record messages, tool results, and selected tool schemas in the request total',
+    )
+    assert.equal(
+      requestBudgetEvent.data.value.requestBudget.estimatedRequest,
+      estimateTokenBudget(
+        compactedRequest.messages,
+        { maxInputTokens: 3000, compactThresholdRatio: 1 },
+        compactedRequest.tools,
+      ).estimatedTotalTokens,
+      'Agent Trace should record the post-compaction budget sent to the model',
+    )
     assert.equal(llm.compactedMessages[0]?.role, 'system', 'compacted message set should keep the system message first')
     assert(
       llm.compactedMessages.some((message) => message.role === 'user' && message.content.startsWith(COMPACTED_RUN_CONTEXT_PREFIX)),
@@ -724,16 +759,22 @@ class CompactionAwareLlm {
     this.sawCompacted = false
     this.afterCompactionToolRequested = false
     this.compactedMessages = []
+    this.requests = []
   }
 
-  async chatWithTools(messages) {
+  async chatWithTools(messages, options) {
     this.turn += 1
-    const sawCompacted = messages.some((message) => (
+    const request = {
+      messages: structuredClone(messages),
+      tools: structuredClone(options.tools ?? []),
+    }
+    this.requests.push(request)
+    const sawCompacted = request.messages.some((message) => (
       message.role === 'user' && message.content.startsWith(COMPACTED_RUN_CONTEXT_PREFIX)
     ))
     if (sawCompacted) {
       this.sawCompacted = true
-      this.compactedMessages = messages
+      this.compactedMessages = request.messages
     }
     if (sawCompacted && !this.afterCompactionToolRequested) {
       this.afterCompactionToolRequested = true
